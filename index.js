@@ -1,7 +1,7 @@
 import express from "express";
 import {pool} from "./db/db.js"
 import dotenv from "dotenv"
-
+import authRoutes from "./routes/auth.js";
 dotenv.config()
 
 
@@ -54,3 +54,16 @@ dotenv.config()
 // test();
 
 
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+app.use(express.json());
+
+app.use("/api/auth",authRoutes);
+app.get("/",(req, res) => {
+    res.send("Hello, Index Page and Ngrok is working");
+})
+
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`Server is running on PORT ${PORT} http://0.0.0.0:${PORT}/`);
+});
