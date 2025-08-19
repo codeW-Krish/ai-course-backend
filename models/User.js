@@ -3,7 +3,7 @@ import { pool } from "../db/db.js";
 export default class User{
     static async create({email, passwordHash, username, pfp_url=null}){
         const query = `
-            INSERT INTO users(email, password_has, username, profile_image,url) VALUES 
+            INSERT INTO users(email, password_hash, username, profile_image_url) VALUES 
             ($1, $2, $3, $4)
             RETURNING id, email, username, created_at
         `;
