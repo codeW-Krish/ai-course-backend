@@ -1,7 +1,9 @@
 import express from "express";
 import {pool} from "./db/db.js"
 import dotenv from "dotenv"
-import authRoutes from "./routes/auth.js";
+import authRouter from "./routes/auth.js";
+import courseRouter from "./routes/course.js";
+
 dotenv.config()
 
 
@@ -59,7 +61,10 @@ const PORT = process.env.PORT || 3000;
 
 app.use(express.json());
 
-app.use("/api/auth",authRoutes);
+app.use("/api/auth",authRouter);
+
+app.use("/api/courses",courseRouter);
+
 app.get("/",(req, res) => {
     res.send("Hello, Index Page and Ngrok is working");
 })
