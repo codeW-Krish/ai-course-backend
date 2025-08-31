@@ -25,7 +25,7 @@ router.post("/:id/enroll", authMiddleware, enrollInCourse);
 // Get full course content with units & subtopics
 router.get("/:id/full", authMiddleware, getCourseContentById);
 
-router.post("/courses/:id/generate-content", authMiddleware, generateCourseContent);
+router.post("/:id/generate-content", authMiddleware, generateCourseContent);
 
 router.get('/api/subtopics/:id/generate-content', generateSubtopicAndRelatedContent);
 

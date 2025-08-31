@@ -22,8 +22,10 @@ Constraints:
   "unit_title": "string",
   "subtopic_title": "string",
   "difficulty": "Beginner | Intermediate | Advanced"
-- Optional: want_youtube_keywords (boolean)
+- (Optional): want_youtube_keywords (boolean) 
 }
+
+if you don't receive want_youtube_keywords then don't include youtube keywords in output repsonse. 
 
 🧱 YOUR OUTPUT FORMAT (strict JSON format):
 Return a valid JSON object with the following structure:
