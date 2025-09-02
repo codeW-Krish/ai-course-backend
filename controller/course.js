@@ -1,9 +1,11 @@
 import { pool } from "../db/db.js";
 import {OUTLINE_SYSTEM_PROMPT} from "../prompts/outlinePrompt.js";
 import {generateOutlineWithGemini} from "../service/geminiService.js"
-import { OutlineRequestSchema, LlmOutlineSchema, normalizeLlmOutline, SubtopicContentSchema } from "../llm/outlineSchemas.js";
+import { OutlineRequestSchema, LlmOutlineSchema, normalizeLlmOutline, SubtopicContentSchema, SubtopicBatchResponseSchema } from "../llm/outlineSchemas.js";
 import { z } from "zod/mini";
 import { SUBTOPIC_SYSTEM_PROMPT } from "../prompts/subTopicSystemPrompt.js";
+import { SUBTOPIC_BATCH_PROMPT } from "../prompts/SubTopicBatchPrompt.js";
+import { startBackgroundGeneration } from "../service/generationQueue.js";
 /*
  POST /api/courses/generate-outline
  *Requires JWT (req.user.id)
@@ -352,7 +354,7 @@ export const generateCourseContent = async (req, res) => {
 
         // Get first 2 units
         const unitRes = await pool.query(
-            `SELECT id, title FROM units WHERE course_id = $1 ORDER BY position ASC LIMIT 2`,
+            `SELECT id, title FROM units WHERE course_id = $1 ORDER BY position ASC LIMIT 1`, // I changed it to 1, we can change it to LIMIT 2
             [courseId]
         );
         const units = unitRes.rows;
@@ -361,8 +363,8 @@ export const generateCourseContent = async (req, res) => {
 
         const chunkArray = (arr, size) => {
             const chunks = [];
-            for (let id = 0; id < array.length; i+=size) {
-                chunks.push(arr.slice(1, i+size));
+            for (let i = 0; i < arr.length; i+=size) {
+                chunks.push(arr.slice(i, i+size));
             }
             return chunks;
         }
@@ -373,64 +375,155 @@ export const generateCourseContent = async (req, res) => {
                 [unit.id]
             );
 
-            for (const subtopic of subtopicsRes.rows) {
-                if (subtopic.content) {
-                    // Skip if content exists
-                    continue;
-                }
+            const missingSubtopics = subtopicsRes.rows.filter(s => !s.content);
+            if(missingSubtopics.length === 0) continue;
 
-                // Generate content for missing subtopic
-                const result = await generateOutlineWithGemini(
-                    {
-                        course_id: courseId,
-                        course_title: courseTitle,
-                        unit_title: unit.title,
-                        subtopic_title: subtopic.title,
-                        difficulty: courseDifficulty || "Beginner",
-                    },
-                    SUBTOPIC_SYSTEM_PROMPT
-                );
-
-                if (!result?.content) {
-                    console.warn(`⚠️ No content returned for subtopic: ${subtopic.title}`);
-                    continue;
-                }
-
-                const contentJson = result.content;
-
-                const parsed = SubtopicContentSchema.safeParse(contentJson);
-                if (!parsed.success){
-                    console.warn(`"Validation Failed for subtopics ${subtopic.title}"`, parsed.error);
-                    continue;
-                }
-
-                // Save subtopic content
-                await pool.query(
-                    `UPDATE subtopics SET content = $1 WHERE id = $2`,
-                    [JSON.stringify(contentJson), subtopic.id]
-                );
-
-                // Optionally queue YouTube keywords
-                if (result.includeVideos && contentJson.youtube_keywords?.length) {
-                    for (const keyword of contentJson.youtube_keywords) {
-                        console.log(`🔍 Queue video search for keyword: ${keyword}`);
-                    }
-                }
-
-                totalSubtopicsProcessed++;
+            let batches = [];
+            if(missingSubtopics.length <= 4){
+                batches = [missingSubtopics];
+            }else{
+                batches = chunkArray(missingSubtopics, 3);
             }
-        }
 
-        return res.status(200).json({
-            message: "Course content generated successfully",
-            units: units.length,
-            subtopics: totalSubtopicsProcessed,
-        });
+            for (const batch of batches) {
+                const batchInput = {
+                    course_title: courseTitle,
+                    unit_title: unit.title,
+                    subtopics: batch.map(s => s.title),
+                    difficulty: courseDifficulty || "Begineer",
+                    want_youtube_keywords: course.include_videos || false
+                }
+
+                const batchRes = await generateOutlineWithGemini(SUBTOPIC_BATCH_PROMPT, batchInput);
+                if (!batchRes || !Array.isArray(batchRes)){
+                    console.warn(`"Invalid batch response for unit: ${unit.title}"`);
+                    continue;
+                }
+
+                const parsed = SubtopicBatchResponseSchema.safeParse(batchRes);
+                if (!parsed.success) {
+                    console.warn(`Batch Schema validation failed for unit: ${unit.title}`, parsed.error);
+                    continue;
+                }
+
+                console.log("Trying to match with subtopics batch:", batch);
+                const normalize = (str) => str?.toLowerCase().replace(/\s+/g, ' ').trim() ?? '';
+                for (const content of parsed.data) {
+
+                    // const matchingSubtopic = batch.find(s =>
+                    //     content.subtopic_title?.toLowerCase().trim() === s.title?.toLowerCase().trim()
+                    // );
+                       const matchingSubtopic = batch.find(s =>
+                            normalize(content.subtopic_title) === normalize(s.title)
+                        );
+
+
+                    if (!matchingSubtopic) {
+                        console.warn(`No matching subtopics found in response from Gemini for ${content.subtopic_title}`);
+                        continue;
+                    }
+
+                    await pool.query(`UPDATE subtopics SET content = $1 WHERE id = $2`, [JSON.stringify(content), matchingSubtopic.id]);
+
+                    if (batchInput.want_youtube_keywords && content.youtube_keywords?.length) {
+                        for (const keyword in content.youtube_keywords) {
+                            console.log(`keyword for YT Video ${keyword}`);
+                        }
+                    }
+
+                    totalSubtopicsProcessed++;
+                }
+
+            }}
+            const subRes = await pool.query(`
+                SELECT s.id 
+                FROM units u 
+                JOIN subtopics s ON u.id = s.unit_id 
+                WHERE u.course_id = $1 AND s.content IS NULL
+                `, [courseId]
+            );
+
+            const remainingSubtopics = subRes.rows;
+
+            await pool.query(`
+                    INSERT INTO course_generation_status (course_id, status, total_subtopics, generated_subtopics, last_updated)
+                    VALUES($1, 'in_progress', $2, 0, NOW())
+                    ON CONFLICT (course_id) DO UPDATE
+                    SET status = 'in_progress', total_subtopics = $2, last_updated = NOW()                
+                `,[courseId, subRes.rowCount]);
+          
+                /// 
+                startBackgroundGeneration(courseId, userId)
+
+            return res.status(200).json({
+                message: "First 2 units generated, background generation started for remaining.",
+                units: units.length,
+                remaining_subtopics: remainingSubtopics.length,
+                status: 'in_progress',
+            });
     } catch (err) {
         console.error("generateCourseContent error:", err);
         return res.status(500).json({ error: "Failed to generate course content" });
     }
 };
+export const getCourseGenerationStatus = async (req, res) => {
+  const courseId = req.params.id;
+  const since = req.query.since;
+
+  try {
+    const statusRes = await pool.query(
+      `
+      SELECT status, total_subtopics, generated_subtopics, last_updated
+      FROM course_generation_status
+      WHERE course_id = $1
+      `,
+      [courseId]
+    );
+
+    if (statusRes.rowCount === 0) {
+      return res.status(404).json({ error: "No generation status found" });
+    }
+
+    const status = statusRes.rows[0];
+
+    let subtopicsQuery = `
+      SELECT s.id, s.title, s.content, s.content_generated_at, u.title AS unit_title
+      FROM subtopics s
+      JOIN units u ON s.unit_id = u.id
+      WHERE u.course_id = $1 AND s.content IS NOT NULL
+    `;
+
+    const params = [courseId];
+
+    if (since) {
+      subtopicsQuery += " AND s.content_generated_at > $2::timestamptz";
+      params.push(since);
+    }
+
+    subtopicsQuery += " ORDER BY s.content_generated_at ASC";
+
+    const subtopicRes = await pool.query(subtopicsQuery, params);
+
+    return res.status(200).json({
+      courseId,
+      status: status.status,
+      totalSubtopics: status.total_subtopics,
+      generatedSubtopics: status.generated_subtopics,
+      lastUpdated: status.last_updated,
+      subtopics: subtopicRes.rows.map((s) => ({
+        id: s.id,
+        title: s.title,
+        content: JSON.parse(s.content),
+        content_generated_at: s.content_generated_at,
+        unit_title: s.unit_title,
+      })),
+    });
+  } catch (err) {
+    console.error("getCourseGenerationStatus error:", err);
+    return res.status(500).json({ error: "Internal Server Error" });
+  }
+};
+
 
 export const generateSubtopicAndRelatedContent = async (req, res) => {
     const subtopicId = req.params.id;
@@ -600,11 +693,11 @@ export const generateSubtopicAndRelatedContent = async (req, res) => {
         res.status(500).json({ error: "Failed to generate subtopic content" });
     }
 };
-function chunkArray(arr, size) {
-  const chunks = [];
-  for (let i = 0; i < arr.length; i += size) {
-    chunks.push(arr.slice(i, i + size));
-  }
-  return chunks;
-}
+    // function chunkArray(arr, size) {
+    //   const chunks = [];
+    //   for (let i = 0; i < arr.length; i += size) {
+    //     chunks.push(arr.slice(i, i + size));
+    //   }
+    //   return chunks;
+    // }
 

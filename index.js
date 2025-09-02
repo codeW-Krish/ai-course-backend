@@ -55,6 +55,26 @@ dotenv.config()
 
 // test();
 
+// const createCourseGenerationStatusTable = async () => {
+//     try {
+//         const res = await pool.query(`
+//             CREATE TABLE IF NOT EXISTS course_generation_status (
+//                 course_id UUID PRIMARY KEY REFERENCES courses(id) ON DELETE CASCADE,
+//                 status VARCHAR(20) NOT NULL DEFAULT 'pending',
+//                 total_subtopics INT DEFAULT 0,
+//                 generated_subtopics INT DEFAULT 0,
+//                 last_updated TIMESTAMP DEFAULT NOW()
+//             );
+//         `);
+//         console.log("✅ Table 'course_generation_status' created or already exists.");
+//     } catch (error) {
+//         console.error("❌ Failed to create 'course_generation_status' table:", error);
+//     } finally {
+//         await pool.end(); // Optional: remove if keeping the app running
+//     }
+// };
+
+// createCourseGenerationStatusTable();
 
 const app = express();
 const PORT = process.env.PORT || 3000;

@@ -34,14 +34,25 @@
     return copy;
   }
 
+export const CoreConceptsSchema = z.object({
+  concept: z.string(),
+  explanation: z.string(),
+})
+
 export const SubtopicContentSchema = z.object({
-  title: z.string().min(3),
-  why_this_matters: z.string().min(10).max(1000),
-  core_concepts: z.array(z.string().min(5)).min(2).max(8),
-  examples: z.array(z.object({
-    type: z.enum(['analogy', 'technical_example']),
-    content: z.string().min(5),
-  })).min(1),
-  code_or_math: z.union([z.string().min(5), z.null()]),
-  youtube_keywords: z.array(z.string().min(2)).nullable().optional(),
+  subtopic_title: z.string(),
+  title: z.string(),
+  why_this_matters: z.string(),
+  core_concepts: z.array(CoreConceptsSchema),
+  examples: z.array(
+    z.object({
+      type: z.enum(["analogy", "technical_example"]),
+      content: z.string(),
+    })
+  ),
+  code_or_math: z.union([z.string(), z.null()]),
+  youtube_keywords: z.union([z.array(z.string()), z.null()]).optional(),
 });
+
+
+export const SubtopicBatchResponseSchema = z.array(SubtopicContentSchema);
