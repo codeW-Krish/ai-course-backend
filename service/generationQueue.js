@@ -2,6 +2,7 @@ import { pool } from '../db/db.js';
 import { generateOutlineWithGemini } from './geminiService.js';
 import { SubtopicBatchResponseSchema } from '../llm/outlineSchemas.js';
 import { SUBTOPIC_BATCH_PROMPT } from '../prompts/SubTopicBatchPrompt.js';
+import { getLLMProvider } from '../providers/ProviderManager.js';
 
 function chunkArray(arr, size) {
   const chunks = [];
@@ -11,13 +12,15 @@ function chunkArray(arr, size) {
   return chunks;
 }
 
-export const startBackgroundGeneration = async (courseId, userId) => {
+export const startBackgroundGeneration = async (courseId, userId, providerName = "gemini") => {
   try {
     const courseRes = await pool.query(
       `SELECT id, title, difficulty, include_videos FROM courses WHERE id = $1`,
       [courseId]
     );
     if (courseRes.rowCount === 0) return;
+
+    const llm = getLLMProvider(providerName);
 
     const course = courseRes.rows[0];
 
@@ -65,7 +68,7 @@ export const startBackgroundGeneration = async (courseId, userId) => {
           want_youtube_keywords: course.include_videos || false,
         };
 
-        const batchRes = await generateOutlineWithGemini(SUBTOPIC_BATCH_PROMPT, batchInput);
+        const batchRes = await llm.generateSubtopicBatch(SUBTOPIC_BATCH_PROMPT, batchInput);
 
         console.log(batchRes);
         
