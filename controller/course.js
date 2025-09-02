@@ -6,6 +6,7 @@ import { z } from "zod/mini";
 import { SUBTOPIC_SYSTEM_PROMPT } from "../prompts/subTopicSystemPrompt.js";
 import { SUBTOPIC_BATCH_PROMPT } from "../prompts/SubTopicBatchPrompt.js";
 import { startBackgroundGeneration } from "../service/generationQueue.js";
+import { getLLMProvider } from "../providers/ProviderManager.js";
 /*
  POST /api/courses/generate-outline
  *Requires JWT (req.user.id)
@@ -334,6 +335,7 @@ export const getCourseContentById = async(req,res) => {
 export const generateCourseContent = async (req, res) => {
     const courseId = req.params.id;
     const userId = req.user?.id;
+    const providerName = req.body.providerName || 'gemini';
 
     if (!userId) return res.status(401).json({ error: "Unauthorized" });
 
@@ -358,6 +360,11 @@ export const generateCourseContent = async (req, res) => {
             [courseId]
         );
         const units = unitRes.rows;
+
+        if (!units.length) return res.status(400).json({ error: "No units to generate." });
+
+        const llm = getLLMProvider(providerName);
+
 
         let totalSubtopicsProcessed = 0;
 
@@ -394,7 +401,7 @@ export const generateCourseContent = async (req, res) => {
                     want_youtube_keywords: course.include_videos || false
                 }
 
-                const batchRes = await generateOutlineWithGemini(SUBTOPIC_BATCH_PROMPT, batchInput);
+                const batchRes = await llm.generateSubtopicBatch(SUBTOPIC_BATCH_PROMPT, batchInput);
                 if (!batchRes || !Array.isArray(batchRes)){
                     console.warn(`"Invalid batch response for unit: ${unit.title}"`);
                     continue;
@@ -453,7 +460,7 @@ export const generateCourseContent = async (req, res) => {
                 `,[courseId, subRes.rowCount]);
           
                 /// 
-                startBackgroundGeneration(courseId, userId)
+                startBackgroundGeneration(courseId, userId, providerName);
 
             return res.status(200).json({
                 message: "First 2 units generated, background generation started for remaining.",
@@ -524,6 +531,67 @@ export const getCourseGenerationStatus = async (req, res) => {
   }
 };
 
+export const retryFailedSubtopics = async(req, res) => {
+    const courseId = req.params.id;
+    const userId = req.user?.id;
+
+    if (!userId) return res.status(401).json({error: "Unauthorized"});
+
+    try {
+        const courseRes = await pool.query("SELECT created_by FROM courses WHERE id = $1", [courseId]);
+
+        if (courseRes.rowCount === 0) {
+            return res.status(404).json({error: "Course Not Found"});
+        }
+
+        const course = courseRes.rows[0];
+        if (course.created_by !== userId) {
+            return res.status(403).json({error: "Forbidden"});
+        }
+
+        // Counting how many subtopic need to retry
+        const subRes = await pool.query(`
+                    SELECT COUNT(*) FROM units u
+                    JOIN subtopics s ON u.id = s.unit_id
+                    WHERE u.course_id = $1 AND s.content IS NULL   
+            `, [courseId])
+
+        const missingCount = parseInt(subRes.rows[0].count || '0');
+        if (missingCount === 0) {
+            return res.status(200).json({
+                message: "No Failed subtopics found to retry",
+                status: "idle",
+                remaining_subtopics: 0
+            });
+        }
+
+        startBackgroundGeneration(courseId, userId)
+        .then(() => {
+            console.log(`Retry background generation started for course: ${courseId}`);
+        })
+        .catch((err) => {
+            console.log(`Retry background generation failed for course: ${courseId}`, err);
+        })
+
+        await pool.query(`
+            INSERT INTO course_generation_status (course_id, status, total_subtopics, generated_subtopics, last_updated)
+            VALUES ($1, 'in_progress', $2, 0, NOW())
+            ON CONFLICT (course_id) DO UPDATE
+            SET status = 'in_progress', total_subtopics = $2, generated_subtopics = 0, last_updated = NOW()   
+        `, [courseId, missingCount]);
+
+        return res.status(202).json({
+            message: "Retry initiated for failed subtopics",
+            status: "in_progress",
+            remaining_subtopics: missingCount
+        })
+        
+    } catch (err) {
+        console.error("retryFailedSubtopics error:", err);
+        return res.status(500).json({ error: "Internal Server Error" });
+    }
+
+}
 
 export const generateSubtopicAndRelatedContent = async (req, res) => {
     const subtopicId = req.params.id;
