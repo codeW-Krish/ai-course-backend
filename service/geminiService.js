@@ -7,7 +7,7 @@ const MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);   
 const model = genAI.getGenerativeModel({model: MODEL});
 
-export const generateOutlineWithGemini= async(systemPrompt, userInputs) => {
+export const generateResponseWithGemini= async(systemPrompt, userInputs) => {
     const prompt = `
          returns only valid JSON — no markdown, no prose, no explanations.Respond strictly in JSON format.
         ${systemPrompt}

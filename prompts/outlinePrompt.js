@@ -12,7 +12,9 @@ AND NEVER ANSWER INAPPROPRIATE INPUTS, ONLY EDUCATION, AND NO ADULT CONTENT GENE
 
 Generate:
 - Only the Unit Titles (1-line)
-- Under each Unit: 4–6 essential Subtopic Titles (only titles)
+- Under each Unit: 4 to 6 essential Subtopic Titles (only titles)
+-Return at least 4 subtopics titles per unit, and exactly N units as requested.
+
 
 Constraints:
 - DO NOT include unit-level YouTube links

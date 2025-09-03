@@ -1,6 +1,6 @@
 import express from "express";
 import { authMiddleware} from "../middleware/authMiddleware.js";
-import { enrollInCourse, generateCourseContent, generateCourseOutline, generateSubtopicAndRelatedContent, getAllPublicCourses, getCourseContentById, getCourseGenerationStatus, getCoursesCreatedByMe, getCoursesEnrolledByMe, retryFailedSubtopics, updateCourseOutline, } from "../controller/course.js";
+import { enrollInCourse, generateCourseContent, generateCourseOutline, getAllPublicCourses, getCourseContentById, getCourseGenerationStatus, getCoursesCreatedByMe, getCoursesEnrolledByMe, retryFailedSubtopics, updateCourseOutline, } from "../controller/course.js";
 
 const router = express.Router();
 
@@ -29,7 +29,7 @@ router.post("/:id/generate-content", authMiddleware, generateCourseContent);
 
 router.post("/:id/retry-failed-subtopics", authMiddleware, retryFailedSubtopics);
 
-router.post('/api/subtopics/:id/generate-content', generateSubtopicAndRelatedContent);
+// router.post('/api/subtopics/:id/generate-content', generateSubtopicAndRelatedContent);
 
 router.get("/:id/generation-status", authMiddleware, getCourseGenerationStatus)
 

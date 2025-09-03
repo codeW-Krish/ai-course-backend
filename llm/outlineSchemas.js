@@ -8,6 +8,8 @@
     numUnits: z.number().int().min(1).max(20),
     difficulty: z.enum(["Beginner", "Intermediate", "Advanced"]),
     includeVideos: z.boolean().optional().default(false),
+    provider: z.string().optional().default("Gemini"),
+    model: z.string().optional().nullable(),
   });
 
   // LLM output schema (strict)
@@ -17,7 +19,7 @@
     units: z.array(z.object({
       position: z.number().int().min(1),
       title: z.string().min(3),
-      subtopics: z.array(z.string().min(2)).min(4).max(6),
+      subtopics: z.array(z.string().min(2)).min(2).max(6),
     })).min(1),
   }).strict();
 

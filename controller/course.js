@@ -1,18 +1,19 @@
 import { pool } from "../db/db.js";
 import {OUTLINE_SYSTEM_PROMPT} from "../prompts/outlinePrompt.js";
-import {generateOutlineWithGemini} from "../service/geminiService.js"
+// import {generateResponseWithGemini} from "../service/geminiService.js"
 import { OutlineRequestSchema, LlmOutlineSchema, normalizeLlmOutline, SubtopicContentSchema, SubtopicBatchResponseSchema } from "../llm/outlineSchemas.js";
 import { z } from "zod/mini";
 import { SUBTOPIC_SYSTEM_PROMPT } from "../prompts/subTopicSystemPrompt.js";
 import { SUBTOPIC_BATCH_PROMPT } from "../prompts/SubTopicBatchPrompt.js";
 import { startBackgroundGeneration } from "../service/generationQueue.js";
-import { getLLMProvider } from "../providers/ProviderManager.js";
+import { getLLMProvider } from "../providers/LLMProviders.js";
 /*
  POST /api/courses/generate-outline
  *Requires JWT (req.user.id)
 */
 
 export const generateCourseOutline =async (req, res) => {
+
     try {
 
         const camelBody = {
@@ -21,6 +22,9 @@ export const generateCourseOutline =async (req, res) => {
             numUnits: req.body.numUnits ?? req.body.num_units,
             difficulty: req.body.difficulty,
             includeVideos: req.body.includeVideos ?? req.body.include_youtube ?? false,
+            provider: req.body.provider ?? "Gemini",
+            model: req.body.model ?? null,
+
         };
 
         const result = OutlineRequestSchema.safeParse(camelBody);
@@ -42,7 +46,9 @@ export const generateCourseOutline =async (req, res) => {
             include_youtube: !!input.includeVideos,
         }
 
-        const llmJosn = await generateOutlineWithGemini(OUTLINE_SYSTEM_PROMPT, userInputs);
+        const llm = getLLMProvider(input.provider, input.model);
+
+        const llmJosn = await llm(OUTLINE_SYSTEM_PROMPT, userInputs);
 
         const normalized = normalizeLlmOutline(llmJosn);
           // Enforce exact numUnits as requested (safety net)
@@ -335,7 +341,10 @@ export const getCourseContentById = async(req,res) => {
 export const generateCourseContent = async (req, res) => {
     const courseId = req.params.id;
     const userId = req.user?.id;
-    const providerName = req.body.providerName || 'gemini';
+    const providerName = req.query.provider || 'Gemini';
+    const model = req.query.model || undefined;
+
+    const llm = getLLMProvider(providerName, model);
 
     if (!userId) return res.status(401).json({ error: "Unauthorized" });
 
@@ -362,8 +371,6 @@ export const generateCourseContent = async (req, res) => {
         const units = unitRes.rows;
 
         if (!units.length) return res.status(400).json({ error: "No units to generate." });
-
-        const llm = getLLMProvider(providerName);
 
 
         let totalSubtopicsProcessed = 0;
@@ -401,7 +408,7 @@ export const generateCourseContent = async (req, res) => {
                     want_youtube_keywords: course.include_videos || false
                 }
 
-                const batchRes = await llm.generateSubtopicBatch(SUBTOPIC_BATCH_PROMPT, batchInput);
+                const batchRes = await llm(SUBTOPIC_BATCH_PROMPT, batchInput);
                 if (!batchRes || !Array.isArray(batchRes)){
                     console.warn(`"Invalid batch response for unit: ${unit.title}"`);
                     continue;
@@ -534,7 +541,8 @@ export const getCourseGenerationStatus = async (req, res) => {
 export const retryFailedSubtopics = async(req, res) => {
     const courseId = req.params.id;
     const userId = req.user?.id;
-
+    const provider = req.body.provider | 'Gemini';
+    const model = req.body.model || undefined;
     if (!userId) return res.status(401).json({error: "Unauthorized"});
 
     try {
@@ -565,7 +573,7 @@ export const retryFailedSubtopics = async(req, res) => {
             });
         }
 
-        startBackgroundGeneration(courseId, userId)
+        startBackgroundGeneration(courseId, userId, provider, model)
         .then(() => {
             console.log(`Retry background generation started for course: ${courseId}`);
         })
@@ -593,179 +601,180 @@ export const retryFailedSubtopics = async(req, res) => {
 
 }
 
-export const generateSubtopicAndRelatedContent = async (req, res) => {
-    const subtopicId = req.params.id;
-    const userId = req.user?.id;
+// export const generateSubtopicAndRelatedContent = async (req, res) => {
+//     const subtopicId = req.params.id;
+//     const userId = req.user?.id;
+//     const provider = req.
 
-    if (!userId) return res.status(401).json({ error: "Unauthorized" });
+//     if (!userId) return res.status(401).json({ error: "Unauthorized" });
 
-    try {
-        // 1. Get subtopic, unit, and course details
-        const subtopicRes = await pool.query(
-            `SELECT s.id, s.title, s.content, s.unit_id, u.course_id, u.title AS unit_title, c.title AS course_title, c.include_videos, c.difficulty AS course_difficulty, c.created_by
-            FROM subtopics s
-            JOIN units u ON s.unit_id = u.id
-            JOIN courses c ON u.course_id = c.id
-            WHERE s.id = $1`,
-            [subtopicId]
-        );
+//     try {
+//         // 1. Get subtopic, unit, and course details
+//         const subtopicRes = await pool.query(
+//             `SELECT s.id, s.title, s.content, s.unit_id, u.course_id, u.title AS unit_title, c.title AS course_title, c.include_videos, c.difficulty AS course_difficulty, c.created_by
+//             FROM subtopics s
+//             JOIN units u ON s.unit_id = u.id
+//             JOIN courses c ON u.course_id = c.id
+//             WHERE s.id = $1`,
+//             [subtopicId]
+//         );
 
-        if (subtopicRes.rowCount === 0)
-            return res.status(404).json({ error: "Subtopic not found" });
+//         if (subtopicRes.rowCount === 0)
+//             return res.status(404).json({ error: "Subtopic not found" });
 
-        const subtopic = subtopicRes.rows[0];
+//         const subtopic = subtopicRes.rows[0];
 
-        // if (
-        //     subtopic.created_by !== userId &&
-        //     !(await pool.query(
-        //         `SELECT 1 FROM user_courses WHERE user_id = $1 AND course_id = $2`,
-        //         [userId, subtopic.course_id]
-        //     )).rowCount
-        // ) {
-        //     return res.status(403).json({ error: "Forbidden" });
-        // }
-        const isCreator = subtopic.created_by === userId;
-        const isEnrolled = (
-            await pool.query(
-                `SELECT 1 FROM user_courses WHERE user_id = $1 AND course_id = $2`,
-                [userId, subtopic.course_id]
-            )
-        ).rowCount > 0;
+//         // if (
+//         //     subtopic.created_by !== userId &&
+//         //     !(await pool.query(
+//         //         `SELECT 1 FROM user_courses WHERE user_id = $1 AND course_id = $2`,
+//         //         [userId, subtopic.course_id]
+//         //     )).rowCount
+//         // ) {
+//         //     return res.status(403).json({ error: "Forbidden" });
+//         // }
+//         const isCreator = subtopic.created_by === userId;
+//         const isEnrolled = (
+//             await pool.query(
+//                 `SELECT 1 FROM user_courses WHERE user_id = $1 AND course_id = $2`,
+//                 [userId, subtopic.course_id]
+//             )
+//         ).rowCount > 0;
 
-        if (!isCreator && !isEnrolled)
-            return res.status(403).json({ error: "Forbidden" });
+//         if (!isCreator && !isEnrolled)
+//             return res.status(403).json({ error: "Forbidden" });
 
-        const { unit_id, course_id, course_title, unit_title,  course_difficulty: courseDifficulty, include_videos } = subtopic;
+//         const { unit_id, course_id, course_title, unit_title,  course_difficulty: courseDifficulty, include_videos } = subtopic;
 
-        // 2. Get siblings (subtopics in same unit)
-        const siblingsRes = await pool.query(
-            `SELECT id, title, content FROM subtopics WHERE unit_id = $1 ORDER BY position ASC`,
-            [unit_id]
-        );
-        const siblings = siblingsRes.rows;
+//         // 2. Get siblings (subtopics in same unit)
+//         const siblingsRes = await pool.query(
+//             `SELECT id, title, content FROM subtopics WHERE unit_id = $1 ORDER BY position ASC`,
+//             [unit_id]
+//         );
+//         const siblings = siblingsRes.rows;
 
-        // 3. Get next unit's subtopics
-        const nextUnitRes = await pool.query(
-            `SELECT id, title FROM units WHERE course_id = $1 AND position > (SELECT position FROM units WHERE id = $2) ORDER BY position ASC LIMIT 1`,
-            [course_id, unit_id]
-        );
-        let nextUnitSubtopics = [];
-        if (nextUnitRes.rowCount > 0) {
-            const nextUnitId = nextUnitRes.rows[0].id;
-            const nextSubsRes = await pool.query(
-                `SELECT id, title, content FROM subtopics WHERE unit_id = $1 ORDER BY position ASC`,
-                [nextUnitId]
-            );
-            nextUnitSubtopics = nextSubsRes.rows;
-        }
+//         // 3. Get next unit's subtopics
+//         const nextUnitRes = await pool.query(
+//             `SELECT id, title FROM units WHERE course_id = $1 AND position > (SELECT position FROM units WHERE id = $2) ORDER BY position ASC LIMIT 1`,
+//             [course_id, unit_id]
+//         );
+//         let nextUnitSubtopics = [];
+//         if (nextUnitRes.rowCount > 0) {
+//             const nextUnitId = nextUnitRes.rows[0].id;
+//             const nextSubsRes = await pool.query(
+//                 `SELECT id, title, content FROM subtopics WHERE unit_id = $1 ORDER BY position ASC`,
+//                 [nextUnitId]
+//             );
+//             nextUnitSubtopics = nextSubsRes.rows;
+//         }
 
-        // 4. Collect all subtopics to generate if content missing:
-        // clicked subtopic + siblings + next unit subtopics
-        const toGenerate = [
-            ...siblings.filter(s => !s.content),
-            ...nextUnitSubtopics.filter(s => !s.content),
-        ];
+//         // 4. Collect all subtopics to generate if content missing:
+//         // clicked subtopic + siblings + next unit subtopics
+//         const toGenerate = [
+//             ...siblings.filter(s => !s.content),
+//             ...nextUnitSubtopics.filter(s => !s.content),
+//         ];
 
-        // // Ensure clicked subtopic is included
-        // if (!subtopic.content) {
-        //     toGenerate.push({
-        //         id: subtopic.id,
-        //         title: subtopic.title,
-        //         // difficulty: difficulty || "Beginner", // Use course's difficulty
-        //     });
-        // }
+//         // // Ensure clicked subtopic is included
+//         // if (!subtopic.content) {
+//         //     toGenerate.push({
+//         //         id: subtopic.id,
+//         //         title: subtopic.title,
+//         //         // difficulty: difficulty || "Beginner", // Use course's difficulty
+//         //     });
+//         // }
 
-        // // Deduplicate by id
-        // const uniqueToGenerate = [];
-        // const seenIds = new Set();
-        // for (const st of toGenerate) {
-        //     if (!seenIds.has(st.id)) {
-        //         seenIds.add(st.id);
-        //         uniqueToGenerate.push(st);
-        //     }
-        // }
+//         // // Deduplicate by id
+//         // const uniqueToGenerate = [];
+//         // const seenIds = new Set();
+//         // for (const st of toGenerate) {
+//         //     if (!seenIds.has(st.id)) {
+//         //         seenIds.add(st.id);
+//         //         uniqueToGenerate.push(st);
+//         //     }
+//         // }
 
-        const seenIds = new Set(toGenerate.map(s => s.id));
-        if (!subtopic.content && !seenIds.has(subtopic.id)) {
-            toGenerate.push({ id: subtopic.id, title: subtopic.title });
-        }
+//         const seenIds = new Set(toGenerate.map(s => s.id));
+//         if (!subtopic.content && !seenIds.has(subtopic.id)) {
+//             toGenerate.push({ id: subtopic.id, title: subtopic.title });
+//         }
 
-        const uniqueToGenerate = [];
-        const uniqueIds = new Set();
-        for (const sub of toGenerate) {
-            if (!uniqueIds.has(sub.id)) {
-                uniqueIds.add(sub.id);
-                uniqueToGenerate.push(sub);
-             }
-        }
+//         const uniqueToGenerate = [];
+//         const uniqueIds = new Set();
+//         for (const sub of toGenerate) {
+//             if (!uniqueIds.has(sub.id)) {
+//                 uniqueIds.add(sub.id);
+//                 uniqueToGenerate.push(sub);
+//              }
+//         }
 
-        // 5. Generate content for missing ones
-        for (const sub of uniqueToGenerate) {
-            const result = await generateOutlineWithGemini(
-                {
-                    course_id,
-                    course_title,
-                    unit_title,
-                    subtopic_title: sub.title,
-                    difficulty: courseDifficulty || "Beginner", // Using course's difficulty
-                },
-                SUBTOPIC_SYSTEM_PROMPT
-            );
+//         // 5. Generate content for missing ones
+//         for (const sub of uniqueToGenerate) {
+//             const result = await llm(
+//                 {
+//                     course_id,
+//                     course_title,
+//                     unit_title,
+//                     subtopic_title: sub.title,
+//                     difficulty: courseDifficulty || "Beginner", // Using course's difficulty
+//                 },
+//                 SUBTOPIC_SYSTEM_PROMPT
+//             );
 
             
-            if (!result?.content) {
-                console.warn(`⚠️ No content returned for subtopic: ${sub.title}`);
-                continue;
-            }
+//             if (!result?.content) {
+//                 console.warn(`⚠️ No content returned for subtopic: ${sub.title}`);
+//                 continue;
+//             }
 
-            const contentJson = result.content;
+//             const contentJson = result.content;
 
-            // Save content
-            await pool.query(
-                `UPDATE subtopics SET content = $1 WHERE id = $2`,
-                [JSON.stringify(contentJson), sub.id]
-            );
+//             // Save content
+//             await pool.query(
+//                 `UPDATE subtopics SET content = $1 WHERE id = $2`,
+//                 [JSON.stringify(contentJson), sub.id]
+//             );
 
-            // Optionally handle YouTube keywords
-            if (result.includeVideos && contentJson.youtube_keywords?.length) {
-                for (const keyword of contentJson.youtube_keywords) {
-                    console.log(`🔍 Queue video search for keyword: ${keyword}`);
-                }
-            }
-        }
+//             // Optionally handle YouTube keywords
+//             if (result.includeVideos && contentJson.youtube_keywords?.length) {
+//                 for (const keyword of contentJson.youtube_keywords) {
+//                     console.log(`🔍 Queue video search for keyword: ${keyword}`);
+//                 }
+//             }
+//         }
 
-        // 6. Return clicked subtopic content + siblings + next unit subtopics content from DB (fresh)
-        const finalSiblingsRes = await pool.query(
-            `SELECT id, title, content FROM subtopics WHERE unit_id = $1 ORDER BY position ASC`,
-            [unit_id]
-        );
-        const finalSiblings = finalSiblingsRes.rows;
+//         // 6. Return clicked subtopic content + siblings + next unit subtopics content from DB (fresh)
+//         const finalSiblingsRes = await pool.query(
+//             `SELECT id, title, content FROM subtopics WHERE unit_id = $1 ORDER BY position ASC`,
+//             [unit_id]
+//         );
+//         const finalSiblings = finalSiblingsRes.rows;
 
-        let finalNextUnitSubtopics = [];
-        if (nextUnitRes.rowCount > 0) {
-            const nextUnitId = nextUnitRes.rows[0].id;
-            const nextSubsRes = await pool.query(
-                `SELECT id, title, content FROM subtopics WHERE unit_id = $1 ORDER BY position ASC`,
-                [nextUnitId]
-            );
-            finalNextUnitSubtopics = nextSubsRes.rows;
-        }
+//         let finalNextUnitSubtopics = [];
+//         if (nextUnitRes.rowCount > 0) {
+//             const nextUnitId = nextUnitRes.rows[0].id;
+//             const nextSubsRes = await pool.query(
+//                 `SELECT id, title, content FROM subtopics WHERE unit_id = $1 ORDER BY position ASC`,
+//                 [nextUnitId]
+//             );
+//             finalNextUnitSubtopics = nextSubsRes.rows;
+//         }
 
-        res.status(200).json({
-            clickedSubtopicId: subtopicId,
-            siblings: finalSiblings,
-            nextUnitSubtopics: finalNextUnitSubtopics,
-        });
-    } catch (err) {
-        console.error("generateSubtopicAndRelatedContent error:", err);
-        res.status(500).json({ error: "Failed to generate subtopic content" });
-    }
-};
-    // function chunkArray(arr, size) {
-    //   const chunks = [];
-    //   for (let i = 0; i < arr.length; i += size) {
-    //     chunks.push(arr.slice(i, i + size));
-    //   }
-    //   return chunks;
-    // }
+//         res.status(200).json({
+//             clickedSubtopicId: subtopicId,
+//             siblings: finalSiblings,
+//             nextUnitSubtopics: finalNextUnitSubtopics,
+//         });
+//     } catch (err) {
+//         console.error("generateSubtopicAndRelatedContent error:", err);
+//         res.status(500).json({ error: "Failed to generate subtopic content" });
+//     }
+// };
+//     // function chunkArray(arr, size) {
+//     //   const chunks = [];
+//     //   for (let i = 0; i < arr.length; i += size) {
+//     //     chunks.push(arr.slice(i, i + size));
+//     //   }
+//     //   return chunks;
+//     // }
 
