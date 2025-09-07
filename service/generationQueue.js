@@ -12,7 +12,7 @@ function chunkArray(arr, size) {
   return chunks;
 }
 
-export const startBackgroundGeneration = async (courseId, userId, providerName = "gemini",model) => {
+export const startBackgroundGeneration = async (courseId, userId, providerName = "Gemini",model) => {
   try {
     const courseRes = await pool.query(
       `SELECT id, title, difficulty, include_videos FROM courses WHERE id = $1`,
