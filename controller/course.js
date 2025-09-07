@@ -175,12 +175,29 @@ export const updateCourseOutline = async(req, res) => {
 
 export const getAllPublicCourses = async(req, res) => {
     try {
+        // const selectQuery = `
+        //     SELECT id, title, description, difficulty, include_videos, created_by, outline_json, created_at
+        //     FROM courses 
+        //     WHERE is_public = TRUE
+        //     ORDER BY created_at DESC
+        // `;
+
         const selectQuery = `
-            SELECT id, title, description, difficulty, include_videos, created_by, outline_json, created_at
-            FROM courses 
-            WHERE is_public = TRUE
-            ORDER BY created_at DESC
-        `;
+            SELECT 
+                c.id,
+                c.title,
+                c.description, 
+                c.difficulty,
+                c.created_by,
+                u.username AS creator_name,
+                COALESCE(stats.total_users_joined, 0) AS total_users_joined
+            FROM courses c
+            LEFT JOIN users u ON c.created_by = u.id
+            LEFT JOIN course_public_stats stats ON c.id = stats.course_id
+            WHERE c.is_public = TRUE
+            ORDER BY c.created_at DESC
+        
+        `
 
         const result = await pool.query(selectQuery);
         return res.status(200).json({courses: result.rows});
@@ -220,7 +237,6 @@ export const getCoursesCreatedByMe = async(req, res) => {
 */
 
 export const enrollInCourse = async(req, res) => {
-    try {
         const userId = req.user?.id;
         const courseId = req.params.id;
 
@@ -228,29 +244,79 @@ export const enrollInCourse = async(req, res) => {
             return res.status(401).json({error: "Unauthorized"});
         }
 
-        const courseExists = await pool.query(
-            "SELECT 1 FROM courses WHERE id = $1",
-            [courseId]
+    //     const courseExists = await pool.query(
+    //         "SELECT 1 FROM courses WHERE id = $1",
+    //         [courseId]
+    //     );
+
+    //     if (courseExists.rowCount === 0) {
+    //         return res.status(404).json({ error: "Course not found" });
+    //     }
+
+    //     const exists = await pool.query("SELECT 1 FROM user_courses WHERE user_id = $1 AND course_id = $2", [userId, courseId]);
+
+    //     if(exists.rowCount > 0){
+    //         return res.status(409).json({ error: "Already enrolled" });
+    //     }
+
+
+    //     // if not already enrolled then enroll 
+    //     await pool.query("INSERT INTO user_courses(user_id, course_id) VALUES($1, $2)", [userId, courseId]);
+    //     return res.status(200).json({message: "Enrolled Successfullty"});
+
+    // } catch (err) {
+    //     console.error("enrollInCourse error:", err);
+    //     return res.status(500).json({ error: "Failed to enroll" });
+    // }
+
+    const client = await pool.connect();
+    try {
+        await client.query("BEGIN");
+
+        const courseExistAndPublic = await client.query(`
+                SELECT is_public FROM courses 
+                WHERE id = $1
+            `, [courseId]);
+            
+        if (courseExistAndPublic.rowCount === 0) {
+            // await client.query("ROLLBACK");
+            return res.status(404).json({error: "Course doesn't exist"});
+        }
+
+        if (!courseExistAndPublic.rows[0].is_public) {
+            // await client.query("ROLLBACK");
+            return res.status(403).json({error: "Can't Enroll in this course it's not public"});
+        }
+
+        // if already enrolled
+        const enrollmentCheck = await client.query(`SELECT 1 FROM user_courses WHERE user_id = $1 AND course_id = $2`, [userId, courseId]); 
+        if (enrollmentCheck.rowCount > 0) {
+            // await client.query("ROLLBACK");
+            return res.status(409).json({error: "Already Enrolled"});
+        }
+
+            // Enroll user in course
+        await client.query(
+        "INSERT INTO user_courses(user_id, course_id) VALUES ($1, $2)",
+        [userId, courseId]
         );
 
-        if (courseExists.rowCount === 0) {
-            return res.status(404).json({ error: "Course not found" });
-        }
+        // Update course_public_stats total_users_joined counter
+        await client.query(`
+        INSERT INTO course_public_stats(course_id, total_users_joined, last_updated)
+        VALUES ($1, 1, NOW())
+        ON CONFLICT (course_id)
+        DO UPDATE SET total_users_joined = course_public_stats.total_users_joined + 1, last_updated = NOW()
+        `, [courseId]);
 
-        const exists = await pool.query("SELECT 1 FROM user_courses WHERE user_id = $1 AND course_id = $2", [userId, courseId]);
-
-        if(exists.rowCount > 0){
-            return res.status(409).json({ error: "Already enrolled" });
-        }
-
-
-        // if not already enrolled then enroll 
-        await pool.query("INSERT INTO user_courses(user_id, course_id) VALUES($1, $2)", [userId, courseId]);
-        return res.status(200).json({message: "Enrolled Successfullty"});
-
+        await client.query("COMMIT");
+        return res.status(200).json({ message: "Enrolled Successfully" });
     } catch (err) {
+        await client.query('ROLLBACK');
         console.error("enrollInCourse error:", err);
         return res.status(500).json({ error: "Failed to enroll" });
+    } finally {
+        client.release();
     }
 }
 
@@ -265,21 +331,43 @@ export const getCoursesEnrolledByMe = async(req, res) => {
             return res.status(401).json({error: "Unauthorized"});
         }
 
+        // const getEnrolledCoursesQuery = `
+        //     SELECT 
+        //         c.id,
+        //         c.title,
+        //         c.description,
+        //         c.difficulty,
+        //         c.include_videos,
+        //         c.status,
+        //         c.created_by,
+        //         c.outline_json,
+        //         uc.joined_at
+        //     FROM user_courses uc
+        //     JOIN courses c ON uc.course_id = c.id
+        //     WHERE uc.user_id = $1
+        //     ORDER BY uc.joined_at DESC 
+        // `
+
         const getEnrolledCoursesQuery = `
-            SELECT 
-                c.id,
-                c.title,
-                c.description,
-                c.difficulty,
-                c.include_videos,
-                c.status,
-                c.created_by,
-                c.outline_json,
-                uc.joined_at
-            FROM user_courses uc
-            JOIN courses c ON uc.course_id = c.id
-            WHERE uc.user_id = $1
-            ORDER BY uc.joined_at DESC 
+                SELECT 
+                    c.id,
+                    c.title,
+                    c.description,
+                    c.difficulty,
+                    c.include_videos,
+                    c.status,
+                    c.created_by,
+                    c.outline_json,
+                    u.username AS creator_name,
+                    COALESCE(stats.total_users_joined, 0) AS total_users_joined,
+                    uc.joined_at
+                FROM user_courses uc
+                JOIN courses c ON uc.course_id = c.id
+                LEFT JOIN users u ON c.created_by = u.id
+                LEFT JOIN course_public_stats stats ON c.id = stats.course_id
+                WHERE uc.user_id = $1 
+                ORDER BY uc.joined_at DESC
+
         `
         
         const result = await pool.query(getEnrolledCoursesQuery, [userId]);
@@ -290,6 +378,59 @@ export const getCoursesEnrolledByMe = async(req, res) => {
         return res.status(500).json({ error: "Failed to fetch enrolled courses" });
     }
 }
+
+/*
+GET -> /api/courses/:id/outline
+*/
+
+export const getCourseOutline = async(req, res) => {
+    const courseId = req.params.id;
+    try {
+        const result = await pool.query(`        
+                SELECT outline_json FROM courses WHERE id = $1 AND is_public = TRUE
+        `, [courseId]);
+
+        if (result.rowCount === 0) {
+            return res.status(404).json({error: "Course not found or not public"});            
+        }
+
+        return res.status(200).josn({outline: result.rows[0].outline_json});
+    } catch (err) {
+        console.error("getCourseOutlineOnly error:", err);
+        return res.status(500).json({ error: "Failed to fetch course outline" });
+    }
+}
+
+/*
+  DELETE -> /api/courses/:id
+*/
+
+export const deleteCourseById = async(req, res) => {
+    const userId = req.user?.id;
+    const courseId = req.params.id;
+
+    if (!userId) return res.status(401).json({error: "Unauthorized"});
+
+    try {
+        const checkOwnerShip = await pool.query(`
+            SELECT created_by FROM courses WHERE id = $1  
+        `, [courseId]);
+
+        if (checkOwnerShip.rowCount === 0) return res.status(404).json({error: "Course Not Found"});
+
+        if (checkOwnerShip.rows[0].created_by != userId) {
+            return res.status(403).json({error: "You're not allowed to delete this course, you're not the owner of the course"});
+        }
+
+        await pool.query(`DELETE FROM courses WHERE id = $1`, [courseId]);
+        
+        return res.status(200).json({message: "Course Deleted Successfully"});
+    } catch (err) {
+        console.error("deleteCourseById error:", err);
+        return res.status(500).json({ error: "Failed to delete course" });
+    }
+}
+
 
 /*
  GET /api/courses/:id/full -> to get teh data on the on click of the card
@@ -304,29 +445,58 @@ export const getCourseContentById = async(req,res) => {
     }
 
     try {
-        const isAccessAble = await pool.query(`
-            SELECT * FROM courses
-            WHERE id = $1 AND (created_by = $2 OR id IN (
-            SELECT course_id FROM user_courses WHERE user_id = $2
-                ))
+        // const isAccessAble = await pool.query(`
+        //     SELECT * FROM courses
+        //     WHERE id = $1 AND (created_by = $2 OR id IN (
+        //     SELECT course_id FROM user_courses WHERE user_id = $2
+        //         ))
 
-            `,[courseId, userId]);
+        //     `,[courseId, userId]);
 
-        if(isAccessAble.rowCount === 0){
-            return res.status(403).json({ error: "Access denied to this course" });
+        // if(isAccessAble.rowCount === 0){
+        //     return res.status(403).json({ error: "Access denied to this course" });
+        // }
+
+        // const course = isAccessAble.rows[0];
+        // const unitsRes= await pool.query(`SELECT * FROM units WHERE course_id = $1 ORDER BY position ASC`, [courseId]);
+        // const units = unitsRes.rows;
+
+        // // getting subtopic for each unit
+        // for(let unit of units){
+        //     const subtopicsRes = await pool.query(`SELECT * FROM subtopics WHERE unit_id = $1 ORDER BY position ASC`, [unit.id]);
+        //     unit.subtopics = subtopicsRes.rows;
+        // }
+
+        // res.status(200).json({ course, units });
+
+        // new code with optimization solved n + 1 query problem and add that is_public filter 
+        const isAccessAble = await pool.query(`SELECT * FROM courses WHERE id = $1 AND (created_by = $2 OR EXISTS (SELECT 1 FROM user_courses WHERE course_id = $1 AND user_id = $2))`, [courseId, userId]);
+
+        if (isAccessAble.rowCount === 0) {
+            return res.status(403).json({error: "Access Denied to this course"});
         }
 
         const course = isAccessAble.rows[0];
-        const unitsRes= await pool.query(`SELECT * FROM units WHERE course_id = $1 ORDER BY position ASC`, [courseId]);
+
+        const unitsRes = await pool.query(`SELECT * FROM units WHERE course_id = $1 ORDER BY position ASC`, [courseId]);
         const units = unitsRes.rows;
 
-        // getting subtopic for each unit
-        for(let unit of units){
-            const subtopicsRes = await pool.query(`SELECT * FROM subtopics WHERE unit_id = $1 ORDER BY position ASC`, [unit.id]);
-            unit.subtopics = subtopicsRes.rows;
+        const unitIds = units.map(u => u.id);
+        const subtopicsRes = await pool.query(`SELECT * FROM subtopics WHERE unit_id = ANY($1::uuid[]) ORDER BY position ASC`, [unitIds]);
+
+        const subtopicsMap = {};
+        for (const subtopic of subtopicsRes.rows) {
+            if (!subtopicsMap[subtopic.unit_id]){
+                subtopicsMap[subtopic.unit_id] = [];
+            }
+            subtopicsMap[subtopic.unit_id].push(subtopic);
         }
 
-        res.status(200).json({ course, units });
+        for (const unit of units) {
+            unit.subtopics = subtopicsMap[unit.id] || [];
+        }
+
+        return res.status(200).json({course, units})
 
     } catch (err) {
         console.error("getCourseContentById error:", err);
@@ -359,6 +529,44 @@ export const generateCourseContent = async (req, res) => {
         const course = courseRes.rows[0];
         if (course.created_by !== userId)
             return res.status(403).json({ error: "Forbidden" });
+
+        const client = await pool.connect();
+
+        try {
+            await client.query('BEGIN');
+
+            const enrollmentCheck = await client.query(`SELECT 1 FROM user_courses WHERE user_id = $1 AND course_id = $2`, [userId, courseId]);
+            const isAlreadyEnrolled = enrollmentCheck.rowCount > 0;
+
+            if (!isAlreadyEnrolled) {
+                await client.query(`
+                    INSERT INTO user_courses(user_id, course_id)
+                    VALUES($1, $2)
+                `, [userId, courseId]);
+
+                // updating the total_user_joined for the course only if its public
+                const publicCheck = await client.query('SELECT is_public FROM courses WHERE id = $1', [courseId]);
+                const isPublic = publicCheck.rows[0]?.is_public;
+
+                if (isPublic) {
+                    await client.query(`
+                        INSERT INTO course_public_stats (course_id, total_users_joined)
+                        VALUES ($1, 1)
+                        ON CONFLICT (course_id) DO UPDATE
+                        SET total_users_joined = course_public_stats.total_users_joined + 1, last_updated = NOW()
+                    `, [courseId]);
+                }
+            }
+
+            await client.query('COMMIT');
+        } catch (e) {
+            await client.query('ROLLBACK');
+            console.error("Auto-enrollment transaction failed:", e);
+        } finally {
+            client.release();
+        }
+
+
 
         const courseTitle = course.title;
         const courseDifficulty = course.difficulty || "Beginner";
@@ -449,6 +657,7 @@ export const generateCourseContent = async (req, res) => {
                 }
 
             }}
+
             const subRes = await pool.query(`
                 SELECT s.id 
                 FROM units u 
@@ -541,7 +750,7 @@ export const getCourseGenerationStatus = async (req, res) => {
 export const retryFailedSubtopics = async(req, res) => {
     const courseId = req.params.id;
     const userId = req.user?.id;
-    const provider = req.body.provider | 'Gemini';
+    const provider = req.body.provider || 'Gemini';
     const model = req.body.model || undefined;
     if (!userId) return res.status(401).json({error: "Unauthorized"});
 
@@ -601,7 +810,211 @@ export const retryFailedSubtopics = async(req, res) => {
 
 }
 
-// export const generateSubtopicAndRelatedContent = async (req, res) => {
+/*
+    GET -> /api/courses/search?query=ai 
+    for on typing search realtime small dropdown list shows up with less data 
+*/
+
+
+export const searchCourses = async(req, res) => {
+    try {
+        const {query} = req.query;
+        if (!query) {
+            return res.status(400).json({ error: "Query parameter is required" });
+        }
+
+        const searchQuery = `
+            SELECT id, title, created_by, u.username AS creator_name, 
+            FROM courses c
+            LEFT JOIN users u ON c.created_by = u.id
+            WHERE c.title LIKE $1
+            ORDER BY c.created_at DESC
+            LIMIT 5
+        `
+        const result = await pool.query(searchQuery, [`%${query}%`]);
+        return res.status(200).json({ courses: result.rows });
+  } catch (err) {
+        console.error("searchCourses error:", err);
+        return res.status(500).json({ error: "Failed to search courses" });
+  }
+}
+/*
+   GET -> /api/courses/search?query=ai&difficulty=Beginner&sort=most_enrolled
+   for big search on that search button click and with filtering and sorting options
+*/
+
+export const searchCoursesFull = async(req, res) => {
+    try{
+        const {query = "", difficulty, sortBy} = req.query;
+
+        if (!query || query.trim() === "") {
+            return res.status(400).json({error: "Search Query Is Required"});  
+        } 
+
+        let baseQuery = `
+            SELECT 
+                c.id,
+                c.title,
+                c.description, 
+                c.difficulty,
+                c.created_by,
+                u.username AS creator_name,
+                COALESCE(stats.total_users_joined, 0) AS total_users_joined
+                c.created_at
+            FROM courses c
+            LEFT JOIN users u ON c.created_by = u.id
+            LEFT JOIN course_public_stats stats ON c.id = stats.course_id
+            WHERE c.is_public = TRUE
+        `
+
+        const params = [];
+        let paramIndex = 1;
+
+        if (query) {
+            baseQuery += ` AND c.title ILIKE $${paramIndex}`;
+            params.push(query);
+            paramIndex++;
+        }
+
+        if (difficulty) {
+            baseQuery += ` AND c.difficulty = $${paramIndex}`;
+            params.push(difficulty);
+            paramIndex++;
+        }
+
+        if (sortBy) {
+            switch (sortBy) {
+                case "Newest":
+                    baseQuery += ' ORDER BY c.created_at DESC';
+                    break;
+                case "Oldest":
+                    baseQuery += ' ORDER BY c.created_by ASC';
+                    break;
+                case "Most_Enrolled":
+                    baseQuery += ' ORDER BY total_users_joined DESC';
+                    break;
+                case 'difficulty_asc':
+                    baseQuery += ' ORDER BY c.difficulty ASC';
+                    break;
+                case 'difficulty_desc':
+                    baseQuery += ' ORDER BY c.difficulty DESC';
+                    break;
+                default:
+                    baseQuery += ' ORDER BY c.created_at DESC'; // default sorting
+            }
+        }
+
+        baseQuery += ' LIMIT 20';
+
+        const result = await pool.query(baseQuery, params);
+        res.status(200).json({ courses: result.rows });
+    }catch(error){
+        console.error('searchCourses error:', err);
+        res.status(500).json({ error: 'Failed to search courses' });
+    }
+
+}
+
+/*
+    GET ->  /api/courses/search?query=AI&difficulties=Beginner,Intermediate&sortBy=popularity&sortDirection=desc
+
+*/
+
+// export const searchCourses = async (req, res) => {
+//   try {
+//     const { query, difficulties, sortBy, sortDirection } = req.query;
+//     // query: string to match course title
+//     // difficulties: comma separated string e.g. "Beginner,Advanced"
+//     // sortBy: "created_at" | "popularity" | "difficulty"
+//     // sortDirection: "asc" or "desc"
+
+//     const userInput = `%${query || ''}%`;
+
+//     let baseQuery = `
+//       SELECT 
+//         c.id,
+//         c.title,
+//         c.description, 
+//         c.difficulty,
+//         c.created_by,
+//         u.username AS creator_name,
+//         COALESCE(stats.total_users_joined, 0) AS total_users_joined
+//       FROM courses c
+//       LEFT JOIN users u ON c.created_by = u.id
+//       LEFT JOIN course_public_stats stats ON c.id = stats.course_id
+//       WHERE c.is_public = TRUE AND c.title ILIKE $1
+//     `;
+
+//     const params = [userInput];
+//     let paramIndex = 2; // track parameter index for SQL placeholders
+
+//     // Handle difficulty filtering (multiple allowed)
+//     if (difficulties) {
+//       const difficultyList = difficulties.split(',').map(d => d.trim());
+//       const placeholders = difficultyList.map(() => `$${paramIndex++}`).join(', ');
+//       baseQuery += ` AND c.difficulty IN (${placeholders})`;
+//       params.push(...difficultyList);
+//     }
+
+//     // Validate sortBy field
+//     const validSortFields = {
+//       created_at: 'c.created_at',
+//       popularity: 'total_users_joined',
+//       difficulty: 'c.difficulty',
+//     };
+
+//     let orderByField = validSortFields[sortBy] || 'c.created_at';
+
+//     // Validate sortDirection
+//     let orderDirection = (sortDirection && sortDirection.toUpperCase() === 'ASC') ? 'ASC' : 'DESC';
+
+//     baseQuery += ` ORDER BY ${orderByField} ${orderDirection}`;
+
+//     baseQuery += ' LIMIT 20';
+
+//     const result = await pool.query(baseQuery, params);
+//     res.status(200).json({ courses: result.rows });
+//   } catch (err) {
+//     console.error('searchCourses error:', err);
+//     res.status(500).json({ error: 'Failed to search courses' });
+//   }
+// };
+
+
+
+/*
+    DELETE -> /api/courses/:id/unenroll
+*/
+
+export const unenrollFromCourse = async(req, res) => {
+    const userId = req.user?.id;
+    const courseId = req.params.id;
+
+    if (!userId) return res.status(401).json({error: "Unauthorized"});
+
+    try {
+        const enrolled = await pool.query(`SELECT 1 FROM user_courses WHERE user_id = $1 AND course_id = $2`, [userId, courseId]);
+
+        if (enrolled.rowCount === 0) return res.status(400).josn({error: "Not enrolled in this course"});
+
+        await pool.query(`
+            DELETE FROM user_courses WHERE user_id = $1 AND course_id = $2            
+        `, [userId, courseId]);
+
+        await pool.query(`
+                UPDATE course_public_stats 
+                SET total_users_joined = GREATEST(total_users_joined - 1, 0), last_updated = NOW()
+                WHERE course_id = $1
+        `, [courseId]);
+
+        return res.status(200).json({message: "Unerolled Successfully"});
+    } catch (error) {
+        console.error("unenrollFromCourse error:", err);
+        return res.status(500).json({ error: "Failed to unenroll" });
+    }
+}
+
+//export const generateSubtopicAndRelatedContent = async (req, res) => {
 //     const subtopicId = req.params.id;
 //     const userId = req.user?.id;
 //     const provider = req.
@@ -723,7 +1136,7 @@ export const retryFailedSubtopics = async(req, res) => {
 
             
 //             if (!result?.content) {
-//                 console.warn(`⚠️ No content returned for subtopic: ${sub.title}`);
+//                 console.warn(`No content returned for subtopic: ${sub.title}`);
 //                 continue;
 //             }
 
@@ -738,7 +1151,7 @@ export const retryFailedSubtopics = async(req, res) => {
 //             // Optionally handle YouTube keywords
 //             if (result.includeVideos && contentJson.youtube_keywords?.length) {
 //                 for (const keyword of contentJson.youtube_keywords) {
-//                     console.log(`🔍 Queue video search for keyword: ${keyword}`);
+//                     console.log(`Queue video search for keyword: ${keyword}`);
 //                 }
 //             }
 //         }
