@@ -1,12 +1,13 @@
 import { pool } from "../db/db.js";
 import {OUTLINE_SYSTEM_PROMPT} from "../prompts/outlinePrompt.js";
 // import {generateResponseWithGemini} from "../service/geminiService.js"
-import { OutlineRequestSchema, LlmOutlineSchema, normalizeLlmOutline, SubtopicContentSchema, SubtopicBatchResponseSchema } from "../llm/outlineSchemas.js";
+import { OutlineRequestSchema, LlmOutlineSchema, normalizeLlmOutline, SubtopicContentSchema, SubtopicBatchResponseSchema, RegenerateContentOutlineSchema, normalizeLlmOutlineForRegeneration } from "../llm/outlineSchemas.js";
 import { z } from "zod/mini";
 import { SUBTOPIC_SYSTEM_PROMPT } from "../prompts/subTopicSystemPrompt.js";
 import { SUBTOPIC_BATCH_PROMPT } from "../prompts/SubTopicBatchPrompt.js";
 import { startBackgroundGeneration } from "../service/generationQueue.js";
 import { getLLMProvider } from "../providers/LLMProviders.js";
+import { fetchYoutubeVideos } from "../service/youtubeService.js";
 /*
  POST /api/courses/generate-outline
  *Requires JWT (req.user.id)
@@ -144,7 +145,7 @@ export const updateCourseOutline = async(req, res) => {
             return res.status(403).json({error: "Forbidden"});
         }
 
-        const normalized = normalizeLlmOutline(req.body?.outline);
+        const normalized = normalizeLlmOutline(req.body);
         const parsed = LlmOutlineSchema.safeParse(normalized);
         
         if (!parsed.success) {
@@ -169,35 +170,585 @@ export const updateCourseOutline = async(req, res) => {
     }
 }
 
+/*
+ AFTER Course content generation creator of the course can update the outline and thus we need to regenerate the content ans store it to the DB tables
+
+*/
+
+
+// WORKING but updating the actual outline_json in course table is pending
+
+// export const updateExistedCourseOutlineAndRegenerateContent = async (req, res) => {
+//   const client = await pool.connect(); // Start a DB transaction
+//   try {
+//     const { id } = req.params; // courseId from the route
+//     const userId = req.user?.id;
+
+//     // Check if the user is authorized
+//     if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+//     // Check if the course exists and if the user is the owner
+//     const ownerCheck = await pool.query("SELECT created_by FROM courses WHERE id = $1", [id]);
+//     if (ownerCheck.rowCount === 0) {
+//       return res.status(404).json({ error: "Course Not Found" });
+//     }
+
+//     if (ownerCheck.rows[0].created_by !== userId) {
+//       return res.status(403).json({ error: "Forbidden" });
+//     }
+
+//     // Normalize the incoming outline (to ensure it's in the correct format)
+//     const normalized = normalizeLlmOutlineForRegeneration(req.body);
+//     console.log("Normalized: ", normalized);
+
+//     const parsed = RegenerateContentOutlineSchema.safeParse(normalized);
+    
+//     if (!parsed.success) {
+//       return res.status(400).json({
+//         error: "Validation Failed",
+//         fields: z.treeifyError(parsed.error),
+//       });
+//     }
+
+//     // Step 1: Fetch the existing units to associate unit_id
+//     const unitsQuery = `
+//       SELECT id, title FROM units WHERE course_id = $1
+//     `;
+//     const unitsResult = await pool.query(unitsQuery, [id]);
+//     const existingUnits = unitsResult.rows;
+
+//     // Step 2: Ensure each unit has an id assigned
+//     const newOutline = parsed.data.units.map(unit => {
+//       const existingUnit = existingUnits.find(existing => existing.title === unit.title);
+//       if (!existingUnit) {
+//         throw new Error(`Unit not found in the database: ${unit.title}`);
+//       }
+//       unit.id = existingUnit.id; // Add the unit_id
+//       return unit;
+//     });
+
+//     // Step 3: Prepare subtopic comparison
+//     const existingSubtopicsQuery = `
+//       SELECT u.id AS unit_id, s.id AS subtopic_id, s.title AS subtopic_title 
+//       FROM units u
+//       JOIN subtopics s ON u.id = s.unit_id
+//       WHERE u.course_id = $1
+//     `;
+//     const currentOutline = await pool.query(existingSubtopicsQuery, [id]);
+//     const existingSubtopics = currentOutline.rows;
+
+//     const toInsertSubtopics = [];
+//     const toUpdateSubtopics = [];
+//     const toDeleteSubtopics = [];
+
+//     // Traverse the new outline and compare subtopics with existing ones in DB
+//     for (const unit of newOutline) {
+//       for (const [index, subtopicTitle] of unit.subtopics.entries()) {
+//         const dbSubtopic = existingSubtopics.find(
+//           (sub) => sub.subtopic_title === subtopicTitle && sub.unit_id === unit.id
+//         );
+
+//         if (dbSubtopic) {
+//           // Subtopic exists, check if it needs updating
+//           if (dbSubtopic.subtopic_title !== subtopicTitle) {
+//             toUpdateSubtopics.push({
+//               id: dbSubtopic.subtopic_id,
+//               unit_id: unit.id,
+//               new_title: subtopicTitle,
+//               position: index + 1,  // Assign position automatically
+//             });
+//           }
+//         } else {
+//           // New subtopic, insert it with position based on order in array
+//           toInsertSubtopics.push({
+//             unit_id: unit.id,
+//             subtopic_title: subtopicTitle,
+//             position: index + 1, // Position starts from 1
+//           });
+//         }
+//       }
+//     }
+
+//     // Handle subtopics deletion (those that no longer exist in the new outline)
+//     for (const dbSubtopic of existingSubtopics) {
+//       const foundInNewOutline = newOutline
+//         .flatMap((unit) => unit.subtopics)
+//         .includes(dbSubtopic.subtopic_title);
+        
+//       if (!foundInNewOutline) {
+//         toDeleteSubtopics.push(dbSubtopic.subtopic_id);
+//       }
+//     }
+
+//     // Step 4: Start transaction
+//     await client.query('BEGIN');
+
+//     // Step 5: Delete subtopics that are no longer present
+//     const deleteSubtopicsPromises = toDeleteSubtopics.map(subtopicId =>
+//       client.query('DELETE FROM subtopics WHERE id = $1', [subtopicId])
+//     );
+//     await Promise.all(deleteSubtopicsPromises);
+
+//     // Step 6: Insert new subtopics with position (position is based on index)
+//     const insertSubtopics = toInsertSubtopics.map(subtopic => [
+//       subtopic.unit_id,          // Correct unit_id is passed
+//       subtopic.subtopic_title,   // Title of the subtopic
+//       subtopic.position          // Position based on order in the subtopics array
+//     ]);
+
+//     const insertQuery = `
+//       INSERT INTO subtopics (unit_id, title, position) 
+//       VALUES ($1, $2, $3)  
+//     `;
+//     const insertPromises = insertSubtopics.map(subtopic =>
+//       client.query(insertQuery, subtopic)
+//     );
+//     await Promise.all(insertPromises); // Insert new subtopics
+
+//     // Step 7: Generate content for new subtopics using LLM
+//     const llm = getLLMProvider(req.body.provider, req.body.model);
+//     const subtopicsTitles = toInsertSubtopics.map(sub => sub.subtopic_title);
+//     const batchInput = {
+//       course_title: req.body.course_title,
+//       unit_title: req.body.unit_title,
+//       subtopics: subtopicsTitles,
+//       difficulty: req.body.difficulty,
+//       want_youtube_keywords: req.body.want_youtube_keywords || false,
+//     };
+    
+//     const generatedContents = await llm(SUBTOPIC_BATCH_PROMPT, batchInput);
+
+//     // Step 8: Insert generated content into subtopics
+//     const contentUpdatePromises = generatedContents.map((content, idx) =>
+//       client.query(
+//         'UPDATE subtopics SET content = $1 WHERE title = $2 AND unit_id = $3',
+//         [JSON.stringify(content), toInsertSubtopics[idx].subtopic_title, toInsertSubtopics[idx].unit_id]
+//       )
+//     );
+//     await Promise.all(contentUpdatePromises);
+
+//     // Commit the transaction
+//     await client.query('COMMIT');
+
+//     return res.json({
+//       status: "draft",
+//       outline: parsed.data,
+//       courseId: id,
+//     });
+
+//   } catch (err) {
+//     await client.query('ROLLBACK');  // Rollback on error
+//     console.error("updateCourseOutline error:", err);
+//     return res.status(500).json({ error: "Failed to update outline" });
+//   } finally {
+//     client.release(); // Release DB connection
+//   }
+// };
+
+// WORKING 100% PROPER USE THIS IF NEEDED
+
+// export const updateExistedCourseOutlineAndRegenerateContent = async (req, res) => {
+//   const client = await pool.connect(); // Start a DB transaction
+//     const providerName = req.query.provider || 'Gemini';
+//     const model = req.query.model || undefined;
+//   try {
+//     const { id } = req.params; // courseId from the route
+//     const userId = req.user?.id;
+
+//     // Check if the user is authorized
+//     if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+//     // Check if the course exists and if the user is the owner
+//     const ownerCheck = await pool.query("SELECT created_by, outline_json FROM courses WHERE id = $1", [id]);
+//     if (ownerCheck.rowCount === 0) {
+//       return res.status(404).json({ error: "Course Not Found" });
+//     }
+
+//     if (ownerCheck.rows[0].created_by !== userId) {
+//       return res.status(403).json({ error: "Forbidden" });
+//     }
+
+//     // Normalize the incoming outline (to ensure it's in the correct format)
+//     const normalized = normalizeLlmOutlineForRegeneration(req.body);
+//     console.log("Normalized: ", normalized);
+
+//     const parsed = RegenerateContentOutlineSchema.safeParse(normalized);
+    
+//     if (!parsed.success) {
+//       return res.status(400).json({
+//         error: "Validation Failed",
+//         fields: z.treeifyError(parsed.error),
+//       });
+//     }
+
+//     // Step 1: Fetch the existing units to associate unit_id
+//     const unitsQuery = `SELECT id, title FROM units WHERE course_id = $1`;
+//     const unitsResult = await pool.query(unitsQuery, [id]);
+//     const existingUnits = unitsResult.rows;
+
+//     // Step 2: Ensure each unit has an id assigned, insert new units if necessary
+//     const newOutline = [];
+
+//     for (const unit of parsed.data.units) {
+//       let existingUnit = existingUnits.find(existing => existing.title === unit.title);
+      
+//       if (!existingUnit) {
+//         // Insert the new unit into the database
+//         const insertUnitQuery = `
+//           INSERT INTO units (course_id, title, position)
+//           VALUES ($1, $2, $3) RETURNING id
+//         `;
+//         const insertResult = await pool.query(insertUnitQuery, [id, unit.title, unit.position]);
+//         existingUnit = { id: insertResult.rows[0].id, title: unit.title };  // Get the new unit id
+//       }
+      
+//       unit.id = existingUnit.id;
+//       newOutline.push(unit); // Add the unit with the correct id to the new outline
+//     }
+
+//     // Step 3: Handle subtopics (insert, update, delete)
+//     const existingSubtopicsQuery = `
+//       SELECT u.id AS unit_id, s.id AS subtopic_id, s.title AS subtopic_title 
+//       FROM units u
+//       JOIN subtopics s ON u.id = s.unit_id
+//       WHERE u.course_id = $1
+//     `;
+//     const currentOutline = await pool.query(existingSubtopicsQuery, [id]);
+//     const existingSubtopics = currentOutline.rows;
+
+//     const toInsertSubtopics = [];
+//     const toUpdateSubtopics = [];
+//     const toDeleteSubtopics = [];
+
+//     // Traverse the new outline and compare subtopics with existing ones in DB
+//     for (const unit of newOutline) {
+//       for (const [index, subtopicTitle] of unit.subtopics.entries()) {
+//         const dbSubtopic = existingSubtopics.find(
+//           (sub) => sub.subtopic_title === subtopicTitle && sub.unit_id === unit.id
+//         );
+
+//         if (dbSubtopic) {
+//           // Subtopic exists, check if it needs updating
+//           if (dbSubtopic.subtopic_title !== subtopicTitle) {
+//             toUpdateSubtopics.push({
+//               id: dbSubtopic.subtopic_id,
+//               unit_id: unit.id,
+//               new_title: subtopicTitle,
+//               position: index + 1,
+//             });
+//           }
+//         } else {
+//           // New subtopic, insert it with position based on order in array
+//           toInsertSubtopics.push({
+//             unit_id: unit.id,
+//             subtopic_title: subtopicTitle,
+//             position: index + 1,
+//           });
+//         }
+//       }
+//     }
+
+//     // Handle subtopics deletion (those that no longer exist in the new outline)
+//     for (const dbSubtopic of existingSubtopics) {
+//       const foundInNewOutline = newOutline
+//         .flatMap((unit) => unit.subtopics)
+//         .includes(dbSubtopic.subtopic_title);
+        
+//       if (!foundInNewOutline) {
+//         toDeleteSubtopics.push(dbSubtopic.subtopic_id);
+//       }
+//     }
+
+//     // Step 4: Start transaction
+//     await client.query('BEGIN');
+
+//     // Step 5: Delete subtopics that are no longer present
+//     const deleteSubtopicsPromises = toDeleteSubtopics.map(subtopicId =>
+//       client.query('DELETE FROM subtopics WHERE id = $1', [subtopicId])
+//     );
+//     await Promise.all(deleteSubtopicsPromises);
+
+//     // Step 6: Insert new subtopics
+//     const insertSubtopics = toInsertSubtopics.map(subtopic => [
+//       subtopic.unit_id,
+//       subtopic.subtopic_title,
+//       subtopic.position
+//     ]);
+//     const insertQuery = `
+//       INSERT INTO subtopics (unit_id, title, position)
+//       VALUES ($1, $2, $3)  
+//     `;
+//     const insertPromises = insertSubtopics.map(subtopic =>
+//       client.query(insertQuery, subtopic)
+//     );
+//     await Promise.all(insertPromises);  // Insert new subtopics
+
+//     // Step 7: Generate content for new subtopics using LLM
+//     const llm = getLLMProvider(providerName, model);
+//     const subtopicsTitles = toInsertSubtopics.map(sub => sub.subtopic_title);
+//     const batchInput = {
+//       course_title: req.body.course_title,
+//       unit_title: req.body.unit_title,
+//       subtopics: subtopicsTitles,
+//       difficulty: req.body.difficulty,
+//       want_youtube_keywords: req.body.want_youtube_keywords || false,
+//     };
+    
+//     const generatedContents = await llm(SUBTOPIC_BATCH_PROMPT, batchInput);
+
+//     // Step 8: Insert generated content into subtopics
+//     const contentUpdatePromises = generatedContents.map((content, idx) =>
+//       client.query(
+//         'UPDATE subtopics SET content = $1 WHERE title = $2 AND unit_id = $3',
+//         [JSON.stringify(content), toInsertSubtopics[idx].subtopic_title, toInsertSubtopics[idx].unit_id]
+//       )
+//     );
+//     await Promise.all(contentUpdatePromises);
+
+//     // Step 10: Update the course outline in the database
+//     const updatedOutline = {
+//       course_title: req.body.course_title,
+//       difficulty: req.body.difficulty,
+//       units: newOutline, // Only include units with subtopics
+//     };
+
+//     // Update the course outline in the database
+//     await client.query(
+//       `UPDATE courses SET outline_json = $1 WHERE id = $2`,
+//       [JSON.stringify(updatedOutline), id]
+//     );
+
+//     // Commit the transaction
+//     await client.query('COMMIT');
+
+//     return res.json({
+//       status: "draft",
+//       outline: updatedOutline,
+//       courseId: id,
+//     });
+
+//   } catch (err) {
+//     await client.query('ROLLBACK');
+//     console.error("updateCourseOutline error:", err);
+//     return res.status(500).json({ error: "Failed to update outline" });
+//   } finally {
+//     client.release();
+//   }
+// };
+
+export const updateOrRegenerateCourseOutline = async (req, res, regenerateContent = false) => {
+  const client = await pool.connect(); // Start DB transaction
+  const providerName = req.query.provider || 'Gemini';  // Optional: specify the LLM provider
+  const model = req.query.model || undefined;  // Optional: specify the model to use for content generation
+  const { id } = req.params;  // courseId from the route
+  const userId = req.user?.id;
+
+  // Check if the user is authorized
+  if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+  // Check if the course exists and if the user is the owner
+  const ownerCheck = await pool.query("SELECT created_by, outline_json FROM courses WHERE id = $1", [id]);
+  if (ownerCheck.rowCount === 0) {
+    return res.status(404).json({ error: "Course Not Found" });
+  }
+
+  if (ownerCheck.rows[0].created_by !== userId) {
+    return res.status(403).json({ error: "Forbidden" });
+  }
+
+  // Normalize the incoming outline (to ensure it's in the correct format)
+  const normalized = normalizeLlmOutlineForRegeneration(req.body);
+  console.log("Normalized: ", normalized);
+
+  const parsed = RegenerateContentOutlineSchema.safeParse(normalized);
+  
+  if (!parsed.success) {
+    return res.status(400).json({
+      error: "Validation Failed",
+      fields: z.treeifyError(parsed.error),
+    });
+  }
+
+  // Step 1: Fetch the existing units and subtopics from the database
+  const unitsQuery = `SELECT id, title FROM units WHERE course_id = $1`;
+  const unitsResult = await pool.query(unitsQuery, [id]);
+  const existingUnits = unitsResult.rows;
+
+  const existingSubtopicsQuery = `
+    SELECT u.id AS unit_id, s.id AS subtopic_id, s.title AS subtopic_title 
+    FROM units u
+    JOIN subtopics s ON u.id = s.unit_id
+    WHERE u.course_id = $1
+  `;
+  const currentOutline = await pool.query(existingSubtopicsQuery, [id]);
+  const existingSubtopics = currentOutline.rows;
+
+  // Step 2: Insert or Update Units in the Outline
+  const newOutline = [];
+
+  for (const unit of parsed.data.units) {
+    let existingUnit = existingUnits.find(existing => existing.title === unit.title);
+    
+    if (!existingUnit) {
+      // Insert the new unit into the database
+      const insertUnitQuery = `
+        INSERT INTO units (course_id, title, position)
+        VALUES ($1, $2, $3) RETURNING id
+      `;
+      const insertResult = await pool.query(insertUnitQuery, [id, unit.title, unit.position]);
+      existingUnit = { id: insertResult.rows[0].id, title: unit.title };  // Get the new unit id
+    }
+    
+    unit.id = existingUnit.id;
+    newOutline.push(unit);  // Add the unit with the correct id to the new outline
+  }
+
+  // Step 3: Handle Subtopics (Insert, Update, Delete)
+  const toInsertSubtopics = [];
+  const toUpdateSubtopics = [];
+  const toDeleteSubtopics = [];
+
+  for (const unit of newOutline) {
+    for (const [index, subtopicTitle] of unit.subtopics.entries()) {
+      const dbSubtopic = existingSubtopics.find(
+        (sub) => sub.subtopic_title === subtopicTitle && sub.unit_id === unit.id
+      );
+
+      if (dbSubtopic) {
+        // Subtopic exists, check if it needs updating
+        if (dbSubtopic.subtopic_title !== subtopicTitle) {
+          toUpdateSubtopics.push({
+            id: dbSubtopic.subtopic_id,
+            unit_id: unit.id,
+            new_title: subtopicTitle,
+            position: index + 1,
+          });
+        }
+      } else {
+        // New subtopic, insert it with position based on order in array
+        toInsertSubtopics.push({
+          unit_id: unit.id,
+          subtopic_title: subtopicTitle,
+          position: index + 1,
+        });
+      }
+    }
+  }
+
+  // Handle subtopics deletion (those that no longer exist in the new outline)
+  for (const dbSubtopic of existingSubtopics) {
+    const foundInNewOutline = newOutline
+      .flatMap((unit) => unit.subtopics)
+      .includes(dbSubtopic.subtopic_title);
+    
+    if (!foundInNewOutline) {
+      toDeleteSubtopics.push(dbSubtopic.subtopic_id);
+    }
+  }
+
+  // Step 4: Start Database Transaction
+  await client.query('BEGIN');
+
+  // Step 5: Delete subtopics that no longer exist
+  const deleteSubtopicsPromises = toDeleteSubtopics.map(subtopicId =>
+    client.query('DELETE FROM subtopics WHERE id = $1', [subtopicId])
+  );
+  await Promise.all(deleteSubtopicsPromises);
+
+  // Step 6: Insert new subtopics
+  const insertSubtopics = toInsertSubtopics.map(subtopic => [
+    subtopic.unit_id,
+    subtopic.subtopic_title,
+    subtopic.position
+  ]);
+  const insertQuery = `
+    INSERT INTO subtopics (unit_id, title, position)
+    VALUES ($1, $2, $3)  
+  `;
+  const insertPromises = insertSubtopics.map(subtopic =>
+    client.query(insertQuery, subtopic)
+  );
+  await Promise.all(insertPromises);  // Insert new subtopics
+
+  // Step 7: Update existing subtopics
+  const updateSubtopicsPromises = toUpdateSubtopics.map(subtopic =>
+    client.query(
+      'UPDATE subtopics SET title = $1, position = $2 WHERE id = $3',
+      [subtopic.new_title, subtopic.position, subtopic.id]
+    )
+  );
+  await Promise.all(updateSubtopicsPromises); // Update existing subtopics
+
+  // Step 8: Generate content for new subtopics using LLM (optional)
+  if (regenerateContent) {
+    const llm = getLLMProvider(providerName, model);
+    const subtopicsTitles = toInsertSubtopics.map(sub => sub.subtopic_title);
+    const batchInput = {
+      course_title: req.body.course_title,
+      unit_title: req.body.unit_title,
+      subtopics: subtopicsTitles,
+      difficulty: req.body.difficulty,
+      want_youtube_keywords: req.body.want_youtube_keywords || false,
+    };
+
+    const generatedContents = await llm(SUBTOPIC_BATCH_PROMPT, batchInput);
+
+    // Step 9: Insert generated content into subtopics
+    const contentUpdatePromises = generatedContents.map((content, idx) =>
+      client.query(
+        'UPDATE subtopics SET content = $1 WHERE title = $2 AND unit_id = $3',
+        [JSON.stringify(content), toInsertSubtopics[idx].subtopic_title, toInsertSubtopics[idx].unit_id]
+      )
+    );
+    await Promise.all(contentUpdatePromises);
+  }
+
+  // Step 10: Update the course outline in the database
+  const updatedOutline = {
+    course_title: req.body.course_title,
+    difficulty: req.body.difficulty,
+    units: newOutline, // Only include units with subtopics
+  };
+
+  await client.query(
+    `UPDATE courses SET outline_json = $1 WHERE id = $2`,
+    [JSON.stringify(updatedOutline), id]
+  );
+
+  // Commit the transaction
+  await client.query('COMMIT');
+
+  return res.json({
+    status: "draft",
+    outline: updatedOutline,
+    courseId: id,
+  });
+};
+
+export const updateOrRegenerateCourseOutlineController = async (req, res) => {
+  const regenerateContent = req.query.regenerate === 'true';
+
+  try {
+    // The service handles the database operations and response
+    await updateOrRegenerateCourseOutline(req, res, regenerateContent);
+  } catch (err) {
+    console.error('Error:', err);
+    res.status(500).json({ error: 'Failed to update course outline' });
+  }
+};
+
 /* 
  GET /api/courses -> to get all the public courses 
 */
 
 export const getAllPublicCourses = async(req, res) => {
     try {
-        // const selectQuery = `
-        //     SELECT id, title, description, difficulty, include_videos, created_by, outline_json, created_at
-        //     FROM courses 
-        //     WHERE is_public = TRUE
-        //     ORDER BY created_at DESC
-        // `;
-
         const selectQuery = `
-            SELECT 
-                c.id,
-                c.title,
-                c.description, 
-                c.difficulty,
-                c.created_by,
-                u.username AS creator_name,
-                COALESCE(stats.total_users_joined, 0) AS total_users_joined
-            FROM courses c
-            LEFT JOIN users u ON c.created_by = u.id
-            LEFT JOIN course_public_stats stats ON c.id = stats.course_id
-            WHERE c.is_public = TRUE
-            ORDER BY c.created_at DESC
-        
-        `
+            SELECT id, title, description, difficulty, include_videos, created_by, outline_json, created_at
+            FROM courses 
+            WHERE is_public = TRUE
+            ORDER BY created_at DESC
+        `;
 
         const result = await pool.query(selectQuery);
         return res.status(200).json({courses: result.rows});
@@ -208,9 +759,6 @@ export const getAllPublicCourses = async(req, res) => {
     }
 }
 
-/* 
- GET /api/courses/me -> get my courses created by me 
-*/
 
 export const getCoursesCreatedByMe = async(req, res) => {
     try {
@@ -231,6 +779,9 @@ export const getCoursesCreatedByMe = async(req, res) => {
         return res.status(500).json({ error: "Failed to fetch your courses" });
     }
 }
+
+
+
 
 /* 
  POST /api/courses/:id/enroll -> to enroll into course
@@ -629,12 +1180,14 @@ export const generateCourseContent = async (req, res) => {
                 }
 
                 console.log("Trying to match with subtopics batch:", batch);
+                
                 const normalize = (str) => str?.toLowerCase().replace(/\s+/g, ' ').trim() ?? '';
                 for (const content of parsed.data) {
-
+                    console.log('Subtopic Title from AI:', content.subtopic_title);
                     // const matchingSubtopic = batch.find(s =>
                     //     content.subtopic_title?.toLowerCase().trim() === s.title?.toLowerCase().trim()
                     // );
+
                        const matchingSubtopic = batch.find(s =>
                             normalize(content.subtopic_title) === normalize(s.title)
                         );
@@ -648,8 +1201,40 @@ export const generateCourseContent = async (req, res) => {
                     await pool.query(`UPDATE subtopics SET content = $1 WHERE id = $2`, [JSON.stringify(content), matchingSubtopic.id]);
 
                     if (batchInput.want_youtube_keywords && content.youtube_keywords?.length) {
-                        for (const keyword in content.youtube_keywords) {
-                            console.log(`keyword for YT Video ${keyword}`);
+                        for (const keyword of content.youtube_keywords) {
+                            console.log(`Fetching YouTube video for keyword: ${keyword}`);
+                            const youtubeVideos = await fetchYoutubeVideos([keyword]);
+
+                            // Check if youtubeVideos is an array and has elements
+                            if (Array.isArray(youtubeVideos) && youtubeVideos.length) {
+                                console.log("youtube Videos: ", youtubeVideos);
+                                
+                                // Store each video for the current subtopic
+                                for (const video of youtubeVideos) {
+                                    const { title, youtube_url, thumbnail, duration_sec } = video;
+                                    const duration = duration_sec ? convertSecondsToDuration(duration_sec) : null;
+
+                                    // Check if the video already exists in the database
+                                    const existingVideoCheck = await pool.query(`
+                                        SELECT 1 FROM videos WHERE youtube_url = $1 AND subtopic_id = $2
+                                    `, [youtube_url, matchingSubtopic.id]);
+
+                                    if (existingVideoCheck.rowCount === 0) {
+                                        // Insert the video if it doesn't already exist
+                                        await pool.query(`
+                                            INSERT INTO videos (subtopic_id, title, youtube_url, thumbnail, duration_sec)
+                                            VALUES ($1, $2, $3, $4, $5)
+                                        `, [matchingSubtopic.id, title, youtube_url, thumbnail, duration]);
+
+                                        console.log(`Inserted video for subtopic ID: ${matchingSubtopic.id}`);
+                                    } else {
+                                        console.log(`Video with URL ${youtube_url} already exists for subtopic ID: ${matchingSubtopic.id}`);
+                                    }
+                                }
+
+                            } else {
+                                console.warn(`No videos found for keyword: ${keyword}`);
+                            }
                         }
                     }
 
@@ -1013,6 +1598,7 @@ export const unenrollFromCourse = async(req, res) => {
         return res.status(500).json({ error: "Failed to unenroll" });
     }
 }
+
 
 //export const generateSubtopicAndRelatedContent = async (req, res) => {
 //     const subtopicId = req.params.id;
