@@ -3,6 +3,7 @@ import { generateResponseWithGemini } from './geminiService.js';
 import { SubtopicBatchResponseSchema } from '../llm/outlineSchemas.js';
 import { SUBTOPIC_BATCH_PROMPT } from '../prompts/SubTopicBatchPrompt.js';
 import { getLLMProvider } from '../providers/LLMProviders.js';
+import { fetchYoutubeVideos } from './youtubeService.js';
 
 function chunkArray(arr, size) {
   const chunks = [];
@@ -101,6 +102,21 @@ export const startBackgroundGeneration = async (courseId, userId, providerName =
             );
             continue;
           }
+
+          // ✅ Fetch YouTube videos if needed (based on keywords in response)
+          if (course.include_videos) {
+            const videos = await fetchYoutubeVideos(content.subtopic_keywords);  // Assuming subtopic_keywords are provided
+
+            // ✅ Insert video data into the "videos" table
+            for (const video of videos) {
+              await pool.query(
+                `INSERT INTO videos (subtopic_id, title, youtube_url, thumbnail, duration_sec)
+                 VALUES ($1, $2, $3, $4, $5)`,
+                [match.id, video.title, video.youtube_url, video.thumbnail, video.duration_sec]
+              );
+            }
+          }
+
 
           await pool.query(
             `UPDATE subtopics SET content = $1, content_generated_at = NOW() WHERE id = $2`,

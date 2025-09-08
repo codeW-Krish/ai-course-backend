@@ -1,5 +1,6 @@
 import dotenv from "dotenv";
 import {GoogleGenerativeAI} from "@google/generative-ai";
+import JSON5 from 'json5';
 dotenv.config();
 
 const MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
@@ -26,7 +27,7 @@ export const generateResponseWithGemini= async(systemPrompt, userInputs) => {
 
       let parsed;
       try {
-        parsed = JSON.parse(jsonStr);
+        parsed = JSON5.parse(jsonStr);
       } catch (e) {
         console.warn("⚠️ Initial JSON.parse failed. Attempting to clean...");
         const firstBrace = jsonStr.indexOf('{');
