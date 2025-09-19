@@ -1212,7 +1212,7 @@ export const generateCourseContent = async (req, res) => {
                                 // Store each video for the current subtopic
                                 for (const video of youtubeVideos) {
                                     const { title, youtube_url, thumbnail, duration_sec } = video;
-                                    const duration = duration_sec ? convertSecondsToDuration(duration_sec) : null;
+                                    const duration = duration_sec || null;
 
                                     // Check if the video already exists in the database
                                     const existingVideoCheck = await pool.query(`
