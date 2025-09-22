@@ -37,13 +37,8 @@ router.get("/:id/full", authMiddleware, getCourseContentById);
 // Generate content for subtopics 
 router.post("/:id/generate-content", authMiddleware, generateCourseContent);
 
-// // Upadte Created Course OUtline and Regenerate the content for it (insert/ update/ delete)
-// router.post("/:id/outline/regenerate", authMiddleware, updateExistedCourseOutlineAndRegenerateContent);
-
 // Retry for topics where subtopic content in NULL
 router.post("/:id/retry-failed-subtopics", authMiddleware, retryFailedSubtopics);
-
-// router.post('/api/subtopics/:id/generate-content', generateSubtopicAndRelatedContent);
 
 // To Check the generation status for poling 
 router.get("/:id/generation-status", authMiddleware, getCourseGenerationStatus)

@@ -558,7 +558,7 @@ export const updateOrRegenerateCourseOutline = async (req, res, regenerateConten
 
   // Normalize the incoming outline (to ensure it's in the correct format)
   const normalized = normalizeLlmOutlineForRegeneration(req.body);
-  console.log("Normalized: ", normalized);
+  console.log("Normalized: ",  JSON.stringify(normalized, null, 2));
 
   const parsed = RegenerateContentOutlineSchema.safeParse(normalized);
   
@@ -987,6 +987,74 @@ export const deleteCourseById = async(req, res) => {
  GET /api/courses/:id/full -> to get teh data on the on click of the card
 */
 
+// export const getCourseContentById = async(req,res) => {
+//     const courseId = req.params.id;
+//     const userId = req.user?.id;
+
+//     if(!userId){
+//         return res.status(401).json({error: "Unauthorized"});
+//     }
+
+//     try {
+//         // const isAccessAble = await pool.query(`
+//         //     SELECT * FROM courses
+//         //     WHERE id = $1 AND (created_by = $2 OR id IN (
+//         //     SELECT course_id FROM user_courses WHERE user_id = $2
+//         //         ))
+
+//         //     `,[courseId, userId]);
+
+//         // if(isAccessAble.rowCount === 0){
+//         //     return res.status(403).json({ error: "Access denied to this course" });
+//         // }
+
+//         // const course = isAccessAble.rows[0];
+//         // const unitsRes= await pool.query(`SELECT * FROM units WHERE course_id = $1 ORDER BY position ASC`, [courseId]);
+//         // const units = unitsRes.rows;
+
+//         // // getting subtopic for each unit
+//         // for(let unit of units){
+//         //     const subtopicsRes = await pool.query(`SELECT * FROM subtopics WHERE unit_id = $1 ORDER BY position ASC`, [unit.id]);
+//         //     unit.subtopics = subtopicsRes.rows;
+//         // }
+
+//         // res.status(200).json({ course, units });
+
+//         // new code with optimization solved n + 1 query problem and add that is_public filter 
+//         const isAccessAble = await pool.query(`SELECT * FROM courses WHERE id = $1 AND (created_by = $2 OR EXISTS (SELECT 1 FROM user_courses WHERE course_id = $1 AND user_id = $2))`, [courseId, userId]);
+
+//         if (isAccessAble.rowCount === 0) {
+//             return res.status(403).json({error: "Access Denied to this course"});
+//         }
+
+//         const course = isAccessAble.rows[0];
+
+//         const unitsRes = await pool.query(`SELECT * FROM units WHERE course_id = $1 ORDER BY position ASC`, [courseId]);
+//         const units = unitsRes.rows;
+
+//         const unitIds = units.map(u => u.id);
+//         const subtopicsRes = await pool.query(`SELECT * FROM subtopics WHERE unit_id = ANY($1::uuid[]) ORDER BY position ASC`, [unitIds]);
+
+//         const subtopicsMap = {};
+//         for (const subtopic of subtopicsRes.rows) {
+//             if (!subtopicsMap[subtopic.unit_id]){
+//                 subtopicsMap[subtopic.unit_id] = [];
+//             }
+//             subtopicsMap[subtopic.unit_id].push(subtopic);
+//         }
+
+//         for (const unit of units) {
+//             unit.subtopics = subtopicsMap[unit.id] || [];
+//         }
+
+//         return res.status(200).json({course, units})
+
+//     } catch (err) {
+//         console.error("getCourseContentById error:", err);
+//         res.status(500).json({ error: "Failed to fetch course content" });
+//     }
+// }
+
 export const getCourseContentById = async(req,res) => {
     const courseId = req.params.id;
     const userId = req.user?.id;
@@ -996,31 +1064,6 @@ export const getCourseContentById = async(req,res) => {
     }
 
     try {
-        // const isAccessAble = await pool.query(`
-        //     SELECT * FROM courses
-        //     WHERE id = $1 AND (created_by = $2 OR id IN (
-        //     SELECT course_id FROM user_courses WHERE user_id = $2
-        //         ))
-
-        //     `,[courseId, userId]);
-
-        // if(isAccessAble.rowCount === 0){
-        //     return res.status(403).json({ error: "Access denied to this course" });
-        // }
-
-        // const course = isAccessAble.rows[0];
-        // const unitsRes= await pool.query(`SELECT * FROM units WHERE course_id = $1 ORDER BY position ASC`, [courseId]);
-        // const units = unitsRes.rows;
-
-        // // getting subtopic for each unit
-        // for(let unit of units){
-        //     const subtopicsRes = await pool.query(`SELECT * FROM subtopics WHERE unit_id = $1 ORDER BY position ASC`, [unit.id]);
-        //     unit.subtopics = subtopicsRes.rows;
-        // }
-
-        // res.status(200).json({ course, units });
-
-        // new code with optimization solved n + 1 query problem and add that is_public filter 
         const isAccessAble = await pool.query(`SELECT * FROM courses WHERE id = $1 AND (created_by = $2 OR EXISTS (SELECT 1 FROM user_courses WHERE course_id = $1 AND user_id = $2))`, [courseId, userId]);
 
         if (isAccessAble.rowCount === 0) {
@@ -1033,16 +1076,38 @@ export const getCourseContentById = async(req,res) => {
         const units = unitsRes.rows;
 
         const unitIds = units.map(u => u.id);
+        
+        // Get subtopics
         const subtopicsRes = await pool.query(`SELECT * FROM subtopics WHERE unit_id = ANY($1::uuid[]) ORDER BY position ASC`, [unitIds]);
+        const subtopics = subtopicsRes.rows;
 
+        // Get videos for all subtopics
+        const subtopicIds = subtopics.map(s => s.id);
+        const videosRes = await pool.query(`SELECT * FROM videos WHERE subtopic_id = ANY($1::uuid[]) ORDER BY subtopic_id, id`, [subtopicIds]);
+        const videos = videosRes.rows;
+
+        // Create maps for organization
         const subtopicsMap = {};
-        for (const subtopic of subtopicsRes.rows) {
-            if (!subtopicsMap[subtopic.unit_id]){
+        const videosMap = {};
+
+        // Organize videos by subtopic_id
+        for (const video of videos) {
+            if (!videosMap[video.subtopic_id]) {
+                videosMap[video.subtopic_id] = [];
+            }
+            videosMap[video.subtopic_id].push(video);
+        }
+
+        // Organize subtopics by unit_id and attach videos
+        for (const subtopic of subtopics) {
+            subtopic.videos = videosMap[subtopic.id] || [];
+            if (!subtopicsMap[subtopic.unit_id]) {
                 subtopicsMap[subtopic.unit_id] = [];
             }
             subtopicsMap[subtopic.unit_id].push(subtopic);
         }
 
+        // Attach subtopics to units
         for (const unit of units) {
             unit.subtopics = subtopicsMap[unit.id] || [];
         }
