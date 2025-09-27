@@ -1187,7 +1187,7 @@ export const generateCourseContent = async (req, res) => {
         const courseTitle = course.title;
         const courseDifficulty = course.difficulty || "Beginner";
 
-        // Get first 2 units
+        // Get first 1 units
         const unitRes = await pool.query(
             `SELECT id, title FROM units WHERE course_id = $1 ORDER BY position ASC LIMIT 1`, // I changed it to 1, we can change it to LIMIT 2
             [courseId]

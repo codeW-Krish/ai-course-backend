@@ -77,7 +77,7 @@ dotenv.config()
 // createCourseGenerationStatusTable();
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 3030;
 
 app.use(express.json());
 
