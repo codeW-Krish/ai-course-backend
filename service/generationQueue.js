@@ -1,5 +1,4 @@
 import { pool } from '../db/db.js';
-import { generateResponseWithGemini } from './geminiService.js';
 import { SubtopicBatchResponseSchema } from '../llm/outlineSchemas.js';
 import { SUBTOPIC_BATCH_PROMPT } from '../prompts/SubTopicBatchPrompt.js';
 import { getLLMProvider } from '../providers/LLMProviders.js';

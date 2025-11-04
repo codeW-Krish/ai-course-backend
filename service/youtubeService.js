@@ -189,7 +189,10 @@ export const fetchYoutubeVideos = async (keywords = []) => {
           q: query,
           part: 'snippet',
           maxResults: maxResult,
-          type: 'video'
+          type: 'video',
+          videoDuration: "medium",
+          videoDefinition: 'high',
+          order: 'relevance'
         }
       });
 

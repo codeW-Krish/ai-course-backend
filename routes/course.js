@@ -1,6 +1,6 @@
 import express from "express";
 import { authMiddleware} from "../middleware/authMiddleware.js";
-import { deleteCourseById, enrollInCourse, generateCourseContent, generateCourseOutline, getAllPublicCourses, getCourseContentById, getCourseGenerationStatus, getCourseOutline, getCoursesCreatedByMe, getCoursesEnrolledByMe, retryFailedSubtopics, updateOrRegenerateCourseOutlineController, } from "../controller/course.js";
+import { deleteCourseById, enrollInCourse, generateCourseContent, generateCourseOutline, getAllPublicCourses, getCourseContentById, getCourseGenerationStatus, getCourseOutline, getCoursesCreatedByMe, getCoursesEnrolledByMe, retryFailedSubtopics, streamCourseGeneration, updateOrRegenerateCourseOutlineController, } from "../controller/course.js";
 
 const router = express.Router();
 
@@ -17,7 +17,7 @@ router.get("/me/enrolled", authMiddleware, getCoursesEnrolledByMe);
 router.post("/generate-outline", authMiddleware, generateCourseOutline);
 
 // Get outline
-router.get(":id/outline", getCourseOutline);
+router.get("/:id/getoutline", getCourseOutline);
 
 // Update a course outline
 router.put("/:id/outline", authMiddleware, updateOrRegenerateCourseOutlineController);
@@ -36,6 +36,9 @@ router.get("/:id/full", authMiddleware, getCourseContentById);
 
 // Generate content for subtopics 
 router.post("/:id/generate-content", authMiddleware, generateCourseContent);
+
+// Stream Generation
+router.post("/:id/generate-content-stream", authMiddleware, streamCourseGeneration);
 
 // Retry for topics where subtopic content in NULL
 router.post("/:id/retry-failed-subtopics", authMiddleware, retryFailedSubtopics);

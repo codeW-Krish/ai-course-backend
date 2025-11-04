@@ -90,4 +90,25 @@ EXAMPLE OUTPUT IN JSON
     }
   ]
 }
+
+INSTRUCTIONS:
+- Output ONLY valid JSON
+- NO markdown
+- NO code blocks
+- NO explanations
+- NO bold text
+- NO extra text
+
+Return exactly:
+{
+  "course_title": "title(same as input JSON)",
+  "difficulty": "difficulty(same as input JSON)",
+  "units": [
+    {
+      "position": "1",
+      "title": "Unit 1: ...",
+      "subtopics": ["Subtopic 1", "Subtopic 2", ...]
+    }
+  ]
+}
 `;

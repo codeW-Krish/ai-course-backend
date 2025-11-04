@@ -79,7 +79,13 @@ dotenv.config()
 const app = express();
 const PORT = process.env.PORT || 3030;
 
-app.use(express.json());
+app.use((req, res, next) => {
+    if (req.originalUrl.includes('/generate-content-stream')) {
+        next(); // Skip JSON parsing
+    } else {
+        express.json()(req, res, next);
+    }
+});
 
 app.use("/api/auth",authRouter);
 
