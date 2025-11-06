@@ -3,6 +3,8 @@ import {pool} from "./db/db.js"
 import dotenv from "dotenv"
 import authRouter from "./routes/auth.js";
 import courseRouter from "./routes/course.js";
+import adminRouter from "./routes/admin.js";
+import settingsRouter from "./routes/settings.js";
 
 dotenv.config()
 
@@ -90,6 +92,10 @@ app.use((req, res, next) => {
 app.use("/api/auth",authRouter);
 
 app.use("/api/courses",courseRouter);
+
+app.use("/api/admin",adminRouter);
+
+app.use("/api/settings",settingsRouter);
 
 app.get("/",(req, res) => {
     res.send("Hello, Index Page and Ngrok is working");

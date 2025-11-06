@@ -1,5 +1,6 @@
 import jwt from "jsonwebtoken";
 import dotenv from "dotenv";
+import User from "../models/User.js";
 
 dotenv.config();
 
@@ -8,12 +9,26 @@ const refreshSecret = process.env.REFRESH_TOKEN_SECRET;
 const accessExpiresIn = process.env.ACCESS_TOKEN_EXPIRES_IN || '15m';
 const refreshExpiresIn = process.env.REFRESH_TOKEN_EXPIRES_IN || '7d';
 
-export const signAccessToken = (payload) => {
-    return jwt.sign(payload, accessTokenSecret, {expiresIn: accessExpiresIn});
+export const signAccessToken = async (payload) => {
+    // Get user to include role in token
+    const user = await User.findById(payload.subject);
+    const tokenPayload = {
+        ...payload,
+        role: user?.role || 'user'
+    };
+    
+    return jwt.sign(tokenPayload, accessTokenSecret, {expiresIn: accessExpiresIn});
 }
 
-export const signRefreshToken = (payload) => {
-    return jwt.sign(payload, refreshSecret, {expiresIn: refreshExpiresIn});
+export const signRefreshToken = async (payload) => {
+    // Get user to include role in token
+    const user = await User.findById(payload.subject);
+    const tokenPayload = {
+        ...payload,
+        role: user?.role || 'user'
+    };
+    
+    return jwt.sign(tokenPayload, refreshSecret, {expiresIn: refreshExpiresIn});
 }
 
 export const verifyAccessToken = (token) => {

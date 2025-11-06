@@ -2783,12 +2783,11 @@ async function processStreamingBatches(course, grouped, total, generated, send, 
 }
 
 // Fire-and-forget YouTube fetching - doesn't block the main process
-async function fetchYoutubeVideosInBackground(keywords, subtopicId) {
-  // Don't await - let it run in background
+export async function fetchYoutubeVideosInBackground(keywords, subtopicId) {
   (async () => {
     try {
       const videos = await fetchYoutubeVideos(keywords);
-      if (!Array.isArray(videos)) return;
+      if (!Array.isArray(videos) || !videos.length) return;
 
       const client = await pool.connect();
       try {
@@ -2813,11 +2812,11 @@ async function fetchYoutubeVideosInBackground(keywords, subtopicId) {
         client.release();
       }
     } catch (e) {
-      console.error(`Background YouTube fetch failed:`, e);
-      // Don't throw - this is fire-and-forget
+      console.error('Background YouTube fetch failed:', e);
     }
   })(); // Immediately invoked, no await
 }
+
 
 
 

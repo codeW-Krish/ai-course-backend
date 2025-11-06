@@ -223,29 +223,41 @@
 // };
 
 //------------------------------------------------------------------------------------------
-
 import axios from 'axios';
 
 const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY;
 
+// --- Helper: convert ISO 8601 duration to seconds ---
 const parseISODurationToSeconds = (iso) => {
   const match = iso.match(/PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?/);
   if (!match) return 0;
-  const [h, m, s] = [match[1] || 0, match[2] || 0, match[3] || 0];
-  return h * 3600 + m * 60 + parseInt(s);
+  const [h, m, s] = [match[1] || 0, match[2] || 0, match[3] || 0].map(Number);
+  return h * 3600 + m * 60 + s;
 };
 
-const fetchVideoDuration = async (videoId) => {
+// --- Bulk fetch durations for multiple video IDs ---
+const fetchVideoDurations = async (videoIds = []) => {
+  if (!videoIds.length) return {};
   try {
     const { data } = await axios.get('https://www.googleapis.com/youtube/v3/videos', {
-      params: { key: YOUTUBE_API_KEY, part: 'contentDetails', id: videoId }
+      params: {
+        key: YOUTUBE_API_KEY,
+        part: 'contentDetails',
+        id: videoIds.join(','),
+      },
     });
-    return parseISODurationToSeconds(data.items[0]?.contentDetails?.duration);
+
+    return data.items.reduce((acc, item) => {
+      acc[item.id] = parseISODurationToSeconds(item.contentDetails.duration);
+      return acc;
+    }, {});
   } catch (e) {
-    return null;
+    console.error('Failed to fetch video durations:', e.message);
+    return {};
   }
 };
 
+// --- Fetch YouTube videos (optimized for best results) ---
 export const fetchYoutubeVideos = async (keywords = []) => {
   if (!keywords.length) return [];
 
@@ -256,34 +268,35 @@ export const fetchYoutubeVideos = async (keywords = []) => {
           key: YOUTUBE_API_KEY,
           q: keyword,
           part: 'snippet',
-          maxResults: 5,
+          maxResults: 30,          // fetch more to pick the best
           type: 'video',
-          videoDuration: 'medium',
+          videoDuration: 'medium', // 4–20 min
           videoDefinition: 'high',
-          order: 'relevance'
-        }
+          order: 'relevance',
+        },
       });
 
-      const videos = await Promise.all(
-        data.items.map(async (item) => {
-          const videoId = item.id.videoId;
-          const duration = await fetchVideoDuration(videoId);
+      const videoIds = data.items.map(item => item.id.videoId);
+      const durationsMap = await fetchVideoDurations(videoIds);
+
+      return data.items
+        .map(item => {
+          const duration = durationsMap[item.id.videoId] || 0;
           return {
             title: item.snippet.title,
-            youtube_url: `https://www.youtube.com/watch?v=${videoId}`,
+            youtube_url: `https://www.youtube.com/watch?v=${item.id.videoId}`,
             thumbnail: item.snippet.thumbnails.high?.url || item.snippet.thumbnails.default.url,
-            duration_sec: duration || 0,
+            duration_sec: duration,
           };
         })
-      );
-
-      // Filter: 2–20 min, high def
-      return videos.filter(v => v.duration_sec >= 120 && v.duration_sec <= 1200);
+        .filter(v => v.duration_sec >= 120 && v.duration_sec <= 1200) // 2–20 min
+        .slice(0, 4); // top 4 per keyword
     } catch (e) {
+      console.error(`YouTube search failed for "${keyword}":`, e.message);
       return [];
     }
   });
 
   const results = await Promise.all(searchPromises);
-  return results.flat().slice(0, 10); // top 10
+  return results.flat();
 };

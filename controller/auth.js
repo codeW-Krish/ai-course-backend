@@ -20,14 +20,14 @@ const disposableDomainSet = new Set(domains);
 
 // zod schemas for validations
 const registerSchema = z.object({
-    email: z.email({error: "Invalid Email Address"}).refine(email => {
+    email: z.email({message: "Invalid Email Address"}).refine(email => {
         const domain = email.split("@")[1].toLowerCase();
         return domain && !disposableDomainSet.has(domain);
     },{
-        error: "Disposable email addresses are not allowed"
+        message: "Disposable email addresses are not allowed"
     }),
-    password: z.string().min(8, {error: "Password must be at least 8 characters long"}),
-    name: z.string().min(1,{error:"Name is Required"}),
+    password: z.string().min(8, {message: "Password must be at least 8 characters long"}),
+    name: z.string().min(1,{message:"Name is Required"}),
 })
 
 const loginSchema = z.object({
@@ -39,14 +39,11 @@ const loginSchema = z.object({
 // use in /api/auth/register
 export const register = async (req, res) => {
     try {
-
-        // const payload = registerSchema.parse(req.body);
         const result = registerSchema.safeParse(req.body);
         if(!result.success){
-            return res.status(400).json({error: "Validation Failed", fields: z.treeifyError(result.error)});
+            return res.status(400).json({error: "Validation Failed", fields: result.error.flatten()});
         } 
         const payload = result.data;
-
 
         // Checking if a user already exists with the given email
         const userExists = await User.findByEmail(payload.email);
@@ -54,16 +51,31 @@ export const register = async (req, res) => {
 
         // hashing and making user (inserting user to DB)
         const pwdHash = await hashPassword(payload.password);
-        const user = await User.create({email: payload.email, passwordHash: pwdHash, username: payload.name});
+        const user = await User.create({
+            email: payload.email, 
+            passwordHash: pwdHash, 
+            username: payload.name,
+            role: 'user' // default role
+        });
 
-        // creating tokens
-        const accessToken = signAccessToken({subject: user.id}); // passing only user id because we don't assing token to whole payload
-        const refreshToken = signRefreshToken({subject: user.id});
+        // creating tokens - now async
+        const accessToken = await signAccessToken({subject: user.id});
+        const refreshToken = await signRefreshToken({subject: user.id});
 
-        const expireAt = computeRefreshTokenExpiryDate(); // getting expireDate fro RefreshToken
-        await RefreshTokenModel.create({userId: user.id, token: refreshToken, expiresAt:expireAt}); // inserting RefreshToken mapped with user into DB
+        const expireAt = computeRefreshTokenExpiryDate();
+        await RefreshTokenModel.create({userId: user.id, token: refreshToken, expiresAt:expireAt});
 
-        res.status(201).json({message: "User Created", user: {id: user.id, email: user.email, username: user.username}, accessToken, refreshToken})
+        res.status(201).json({
+            message: "User Created", 
+            user: {
+                id: user.id, 
+                email: user.email, 
+                username: user.username,
+                role: user.role
+            }, 
+            accessToken, 
+            refreshToken
+        })
 
     } catch (err) {
          console.error(err);
@@ -71,13 +83,12 @@ export const register = async (req, res) => {
     }
 }
 
+
 export const login = async (req, res) => {
     try {
-        // const payload = loginSchema.parse(req.body);
-        // safeparse() method don't throw an error but return an object with error fields so that on frontend/app we can easily debug issue
         const result = loginSchema.safeParse(req.body);
         if(!result.success){
-            return res.status(400).json({error: "Validation Failed", fields: z.treeifyError(result.error)});
+            return res.status(400).json({error: "Validation Failed", fields: result.error.flatten()});
         }
 
         const payload = result.data;
@@ -88,13 +99,24 @@ export const login = async (req, res) => {
         const isPassValid = await verifyPassword(payload.password, user.password_hash)
         if(!isPassValid) return res.status(401).json({error: "Invalid credentials"});
 
-        const accessToken = signAccessToken({subject: user.id});
-        const refreshToken = signRefreshToken({subject: user.id});
+        // Create tokens with role - now async
+        const accessToken = await signAccessToken({subject: user.id});
+        const refreshToken = await signRefreshToken({subject: user.id});
 
         const expireAt = computeRefreshTokenExpiryDate();
         await RefreshTokenModel.create({userId: user.id, token: refreshToken, expiresAt: expireAt});
 
-        res.status(200).json({message: "Login Successfully", user: {id: user.id, email: user.email, username: user.username}, accessToken, refreshToken});
+        res.status(200).json({
+            message: "Login Successfully", 
+            user: {
+                id: user.id, 
+                email: user.email, 
+                username: user.username,
+                role: user.role
+            }, 
+            accessToken, 
+            refreshToken
+        });
 
     } catch (err) {
         console.error(err);
@@ -102,6 +124,7 @@ export const login = async (req, res) => {
     }
 }
 
+// Update refresh to include role in new tokens
 export const refresh = async(req, res) => {
     try {
         const token = req.body?.refreshToken || req.headers['x-refresh-token'];
@@ -114,19 +137,21 @@ export const refresh = async(req, res) => {
         try {
             verifyRefreshToken(token);
         } catch (error) {
-            await RefreshTokenModel.revoke(token); // deleting token from DB
+            await RefreshTokenModel.revoke(token);
             return res.status(401).json({ error: 'Refresh token invalid or expired' });
         }
 
         const payload = {sub: isValidToken.user_id};
-        const newAccessToken = signAccessToken(payload);
-        const newRefreshToken = signRefreshToken(payload);
+        
+        // Create new tokens with role - now async
+        const newAccessToken = await signAccessToken(payload);
+        const newRefreshToken = await signRefreshToken(payload);
         const expireAt = computeRefreshTokenExpiryDate();
 
         await RefreshTokenModel.revoke(token);
         await RefreshTokenModel.create({userId: isValidToken.user_id, token: newRefreshToken, expiresAt:expireAt});
 
-        res.status(201).json({message: "New RefreshToken assigned successfully", newAccessToken, newRefreshToken});
+        res.status(201).json({message: "New RefreshToken assigned successfully", accessToken: newAccessToken, refreshToken: newRefreshToken});
     } catch (err) {
         console.error(err);
         return res.status(401).json({error: err.message})
