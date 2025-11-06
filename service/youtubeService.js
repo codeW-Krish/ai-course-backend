@@ -133,89 +133,157 @@
 // };
 
 
+//------------------------------------------------------------------------------------------
+
+// import axios from 'axios';
+
+// const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY;  // Make sure this is set in your environment
+
+// // ✅ Function to convert ISO 8601 duration to total seconds
+// const parseISODurationToSeconds = (isoDuration) => {
+//   const match = isoDuration.match(/PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?/);
+//   if (!match) return 0;
+
+//   const hours = parseInt(match[1] || "0", 10);
+//   const minutes = parseInt(match[2] || "0", 10);
+//   const seconds = parseInt(match[3] || "0", 10);
+
+//   return hours * 3600 + minutes * 60 + seconds;
+// };
+
+// // ✅ Fetch duration in seconds from YouTube
+// const fetchVideoDuration = async (videoId) => {
+//   try {
+//     const response = await axios.get('https://www.googleapis.com/youtube/v3/videos', {
+//       params: {
+//         key: YOUTUBE_API_KEY,
+//         part: 'contentDetails',
+//         id: videoId,
+//       }
+//     });
+
+//     const video = response.data.items[0];
+//     if (video) {
+//       const isoDuration = video.contentDetails.duration;
+//       return parseISODurationToSeconds(isoDuration);  // ✅ return seconds (int)
+//     }
+//   } catch (error) {
+//     console.error(`❌ Error fetching video duration for ${videoId}:`, error);
+//     return null;
+//   }
+// };
+
+// // ✅ Main function to fetch YouTube videos with duration in seconds
+// export const fetchYoutubeVideos = async (keywords = []) => {
+//   if (!keywords || keywords.length === 0) return [];
+
+//   const allVideos = [];
+
+//   for (const keyword of keywords) {
+//     const query = encodeURIComponent(keyword);
+//     const maxResult = 3;
+
+//     try {
+//       // Step 1: Search for videos
+//       const searchResponse = await axios.get('https://www.googleapis.com/youtube/v3/search', {
+//         params: {
+//           key: YOUTUBE_API_KEY,
+//           q: query,
+//           part: 'snippet',
+//           maxResults: maxResult,
+//           type: 'video',
+//           videoDuration: "medium",
+//           videoDefinition: 'high',
+//           order: 'relevance'
+//         }
+//       });
+
+//       // Step 2: Fetch details (duration)
+//       const videoDetails = await Promise.all(
+//         searchResponse.data.items.map(async (item) => {
+//           const videoId = item.id.videoId;
+//           const duration_sec = await fetchVideoDuration(videoId);  // ✅ seconds
+
+//           return {
+//             title: item.snippet.title,
+//             youtube_url: `https://www.youtube.com/watch?v=${videoId}`,
+//             thumbnail: item.snippet.thumbnails.default.url,
+//             duration_sec: duration_sec || 0,  // ✅ always return seconds as a number
+//           };
+//         })
+//       );
+
+//       allVideos.push(...videoDetails);
+//     } catch (err) {
+//       console.error(`❌ Error fetching YouTube videos for keyword "${keyword}":`, err);
+//     }
+//   }
+
+//   return allVideos;
+// };
+
+//------------------------------------------------------------------------------------------
+
 import axios from 'axios';
 
-const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY;  // Make sure this is set in your environment
+const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY;
 
-// ✅ Function to convert ISO 8601 duration to total seconds
-const parseISODurationToSeconds = (isoDuration) => {
-  const match = isoDuration.match(/PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?/);
+const parseISODurationToSeconds = (iso) => {
+  const match = iso.match(/PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?/);
   if (!match) return 0;
-
-  const hours = parseInt(match[1] || "0", 10);
-  const minutes = parseInt(match[2] || "0", 10);
-  const seconds = parseInt(match[3] || "0", 10);
-
-  return hours * 3600 + minutes * 60 + seconds;
+  const [h, m, s] = [match[1] || 0, match[2] || 0, match[3] || 0];
+  return h * 3600 + m * 60 + parseInt(s);
 };
 
-// ✅ Fetch duration in seconds from YouTube
 const fetchVideoDuration = async (videoId) => {
   try {
-    const response = await axios.get('https://www.googleapis.com/youtube/v3/videos', {
-      params: {
-        key: YOUTUBE_API_KEY,
-        part: 'contentDetails',
-        id: videoId,
-      }
+    const { data } = await axios.get('https://www.googleapis.com/youtube/v3/videos', {
+      params: { key: YOUTUBE_API_KEY, part: 'contentDetails', id: videoId }
     });
-
-    const video = response.data.items[0];
-    if (video) {
-      const isoDuration = video.contentDetails.duration;
-      return parseISODurationToSeconds(isoDuration);  // ✅ return seconds (int)
-    }
-  } catch (error) {
-    console.error(`❌ Error fetching video duration for ${videoId}:`, error);
+    return parseISODurationToSeconds(data.items[0]?.contentDetails?.duration);
+  } catch (e) {
     return null;
   }
 };
 
-// ✅ Main function to fetch YouTube videos with duration in seconds
 export const fetchYoutubeVideos = async (keywords = []) => {
-  if (!keywords || keywords.length === 0) return [];
+  if (!keywords.length) return [];
 
-  const allVideos = [];
-
-  for (const keyword of keywords) {
-    const query = encodeURIComponent(keyword);
-    const maxResult = 3;
-
+  const searchPromises = keywords.map(async (keyword) => {
     try {
-      // Step 1: Search for videos
-      const searchResponse = await axios.get('https://www.googleapis.com/youtube/v3/search', {
+      const { data } = await axios.get('https://www.googleapis.com/youtube/v3/search', {
         params: {
           key: YOUTUBE_API_KEY,
-          q: query,
+          q: keyword,
           part: 'snippet',
-          maxResults: maxResult,
+          maxResults: 5,
           type: 'video',
-          videoDuration: "medium",
+          videoDuration: 'medium',
           videoDefinition: 'high',
           order: 'relevance'
         }
       });
 
-      // Step 2: Fetch details (duration)
-      const videoDetails = await Promise.all(
-        searchResponse.data.items.map(async (item) => {
+      const videos = await Promise.all(
+        data.items.map(async (item) => {
           const videoId = item.id.videoId;
-          const duration_sec = await fetchVideoDuration(videoId);  // ✅ seconds
-
+          const duration = await fetchVideoDuration(videoId);
           return {
             title: item.snippet.title,
             youtube_url: `https://www.youtube.com/watch?v=${videoId}`,
-            thumbnail: item.snippet.thumbnails.default.url,
-            duration_sec: duration_sec || 0,  // ✅ always return seconds as a number
+            thumbnail: item.snippet.thumbnails.high?.url || item.snippet.thumbnails.default.url,
+            duration_sec: duration || 0,
           };
         })
       );
 
-      allVideos.push(...videoDetails);
-    } catch (err) {
-      console.error(`❌ Error fetching YouTube videos for keyword "${keyword}":`, err);
+      // Filter: 2–20 min, high def
+      return videos.filter(v => v.duration_sec >= 120 && v.duration_sec <= 1200);
+    } catch (e) {
+      return [];
     }
-  }
+  });
 
-  return allVideos;
+  const results = await Promise.all(searchPromises);
+  return results.flat().slice(0, 10); // top 10
 };

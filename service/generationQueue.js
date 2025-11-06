@@ -1,7 +1,7 @@
 import { pool } from '../db/db.js';
 import { SubtopicBatchResponseSchema } from '../llm/outlineSchemas.js';
 import { SUBTOPIC_BATCH_PROMPT } from '../prompts/SubTopicBatchPrompt.js';
-import { getLLMProvider } from '../providers/LLMProviders.js';
+// import { getLLMProvider } from '../providers/LLMProviders.js';
 import { fetchYoutubeVideos } from './youtubeService.js';
 
 function chunkArray(arr, size) {

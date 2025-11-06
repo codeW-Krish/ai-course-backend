@@ -22,7 +22,7 @@ router.get("/:id/getoutline", getCourseOutline);
 // Update a course outline
 router.put("/:id/outline", authMiddleware, updateOrRegenerateCourseOutlineController);
 
-// Upadte Created Course OUtline and Regenerate the content for it (insert/ update/ delete)
+// Upadte Created Course Outline and Regenerate the content for it (insert/ update/ delete)
 router.post("/:id/outline/regenerate", authMiddleware, updateOrRegenerateCourseOutlineController);
 
 // Enroll user into a course
