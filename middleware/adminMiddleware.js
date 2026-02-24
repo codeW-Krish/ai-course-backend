@@ -1,38 +1,53 @@
-import jwt from "jsonwebtoken";
+import { db } from "../db/firebase.js";
+import { extractBearerToken, tokenErrorReason, verifyAccessToken } from "../service/authTokenService.js";
 
-export const adminMiddleware = (req, res, next) => {
-  const authHeader = req.headers['authorization'];
+const adminMiddleware = async (req, res, next) => {
+  const authHeader = req.headers.authorization;
+  const accessToken = extractBearerToken(authHeader);
 
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return res.status(401).json({ message: "Authorization header is missing or malformed" });
+  if (!accessToken) {
+    console.warn("[auth:admin] 401 missing_token (no bearer token)");
+    return res.status(401).json({
+      error: "No token provided",
+      reason: "missing_token",
+    });
   }
 
-  const token = authHeader.split(' ')[1];
-
   try {
-    const secretKey = process.env.ACCESS_TOKEN_SECRET;
+    const decoded = verifyAccessToken(accessToken);
 
-    if (!secretKey) {
-      throw new Error('ACCESS_TOKEN_SECRET not set in environment variables');
+    const userDoc = await db.collection("users").doc(decoded.sub).get();
+
+    if (!userDoc.exists) {
+      return res.status(401).json({
+        error: "User not found",
+        reason: "invalid_token",
+      });
     }
 
-    const decoded = jwt.verify(token, secretKey);
+    const userData = userDoc.data();
 
-    // Check if user is admin
-    if (decoded.role !== 'admin') {
-      return res.status(403).json({ message: "Admin access required" });
+    if (userData.role !== "admin") {
+      return res.status(403).json({ error: "Admin access required" });
     }
 
-    // Attach admin user data to request object
     req.user = {
-      id: decoded.sub || decoded.subject,
+      id: decoded.sub,
       email: decoded.email,
-      username: decoded.username,
-      role: decoded.role
+      username: userData.username || decoded.email?.split("@")[0],
+      role: userData.role,
     };
 
     next();
-  } catch (err) {
-    return res.status(403).json({ message: "Invalid or expired token" });
+  } catch (error) {
+    const reason = tokenErrorReason(error);
+    console.warn(`[auth:admin] 401 ${reason} (${error?.message || "verify failed"})`);
+    return res.status(401).json({
+      error: reason === "expired_token" ? "Token expired" : "Invalid token",
+      reason,
+    });
   }
 };
+
+export { adminMiddleware };
+export default adminMiddleware;

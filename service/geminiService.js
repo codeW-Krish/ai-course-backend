@@ -46,3 +46,17 @@ export const generateResponseWithGemini = async (systemPrompt, userInputs) => {
 
   return parsed;
 };
+
+export const generateChatResponseWithGemini = async (systemPrompt, userMessages) => {
+  // userMessages can be a simple string or an array of history. 
+  // keeping it simple for now: systemPrompt combines context + user query.
+
+  try {
+    const result = await model.generateContent(systemPrompt);
+    const text = result.response.text();
+    return text;
+  } catch (error) {
+    console.error("Gemini Chat Error:", error);
+    throw new Error("Failed to generate chat response");
+  }
+}

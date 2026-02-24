@@ -1,8 +1,10 @@
-import { pool } from '../db/db.js';
-import { SubtopicBatchResponseSchema } from '../llm/outlineSchemas.js';
-import { SUBTOPIC_BATCH_PROMPT } from '../prompts/SubTopicBatchPrompt.js';
-// import { getLLMProvider } from '../providers/LLMProviders.js';
-import { fetchYoutubeVideos } from './youtubeService.js';
+import { db } from "../db/firebase.js";
+import { SubtopicBatchResponseSchema } from "../llm/outlineSchemas.js";
+import { SUBTOPIC_BATCH_PROMPT } from "../prompts/SubTopicBatchPrompt.js";
+import { getLLMProvider } from "../providers/LLMProviders.js";
+import { fetchYoutubeVideos } from "./youtubeService.js";
+
+const coursesRef = db.collection("courses");
 
 function chunkArray(arr, size) {
   const chunks = [];
@@ -12,50 +14,45 @@ function chunkArray(arr, size) {
   return chunks;
 }
 
-export const startBackgroundGeneration = async (courseId, userId, providerName = "Gemini",model) => {
+export const startBackgroundGeneration = async (courseId, userId, providerName = "Gemini", model) => {
   try {
-    const courseRes = await pool.query(
-      `SELECT id, title, difficulty, include_videos FROM courses WHERE id = $1`,
-      [courseId]
-    );
-    if (courseRes.rowCount === 0) return;
+    const courseDoc = await coursesRef.doc(courseId).get();
+    if (!courseDoc.exists) return;
 
+    const course = courseDoc.data();
     const llm = getLLMProvider(providerName, model);
 
-    const course = courseRes.rows[0];
+    // Fetch all units + missing subtopics
+    const unitsSnap = await coursesRef.doc(courseId).collection("units").orderBy("position").get();
 
-    // ✅ Fetch all subtopics (with unit info)
-    const subRes = await pool.query(
-      `
-      SELECT 
-        s.id, s.title, s.unit_id, u.title as unit_title
-      FROM units u
-      JOIN subtopics s ON u.id = s.unit_id
-      WHERE u.course_id = $1 AND s.content IS NULL
-      ORDER BY u.position ASC, s.position ASC
-    `,
-      [courseId]
-    );
+    const grouped = new Map(); // key: unitId, value: { unit_title, subtopics: [] }
 
-    const allSubtopics = subRes.rows;
-    if (allSubtopics.length === 0) return;
+    for (const unitDoc of unitsSnap.docs) {
+      const subsSnap = await unitDoc.ref.collection("subtopics").orderBy("position").get();
 
-    // ✅ Group subtopics by unit_id
-    const grouped = new Map(); // key: unit_id, value: { unit_title, subtopics: [] }
-
-    for (const sub of allSubtopics) {
-      if (!grouped.has(sub.unit_id)) {
-        grouped.set(sub.unit_id, {
-          unit_title: sub.unit_title,
-          subtopics: [],
-        });
+      for (const subDoc of subsSnap.docs) {
+        if (!subDoc.data().content) {
+          if (!grouped.has(unitDoc.id)) {
+            grouped.set(unitDoc.id, {
+              unit_title: unitDoc.data().title,
+              subtopics: [],
+            });
+          }
+          grouped.get(unitDoc.id).subtopics.push({
+            id: subDoc.id,
+            title: subDoc.data().title,
+            unit_id: unitDoc.id,
+          });
+        }
       }
-      grouped.get(sub.unit_id).subtopics.push(sub);
     }
+
+    const allSubtopics = Array.from(grouped.values()).flatMap((g) => g.subtopics);
+    if (allSubtopics.length === 0) return;
 
     let generatedCount = 0;
 
-    // ✅ Loop over each unit group
+    // Process each unit group
     for (const [unitId, group] of grouped) {
       const batches = chunkArray(group.subtopics, 3);
 
@@ -64,93 +61,105 @@ export const startBackgroundGeneration = async (courseId, userId, providerName =
           course_title: course.title,
           unit_title: group.unit_title,
           subtopics: batch.map((s) => s.title),
-          difficulty: course.difficulty || 'Begineer',
+          difficulty: course.difficulty || "Beginner",
           want_youtube_keywords: course.include_videos || false,
         };
 
         const batchRes = await llm(SUBTOPIC_BATCH_PROMPT, batchInput);
 
-        console.log(batchRes);
-        
-
         if (!batchRes || !Array.isArray(batchRes)) {
-          console.warn(`⚠️ Invalid response from Gemini for unit: ${group.unit_title}`);
+          console.warn(`⚠️ Invalid response for unit: ${group.unit_title}`);
           continue;
         }
 
         const parsed = SubtopicBatchResponseSchema.safeParse(batchRes);
         if (!parsed.success) {
-          console.warn(
-            `⚠️ Schema validation failed for unit: ${group.unit_title}`,
-            parsed.error
-          );
+          console.warn(`⚠️ Schema validation failed for unit: ${group.unit_title}`, parsed.error);
           continue;
         }
 
-        const normalize = (str) =>
-          str?.toLowerCase().replace(/\s+/g, ' ').trim();
+        const normalize = (str) => str?.toLowerCase().replace(/\s+/g, " ").trim();
 
         for (const content of parsed.data) {
-          const match = batch.find(
-            (s) => normalize(s.title) === normalize(content.subtopic_title)
-          );
+          const match = batch.find((s) => normalize(s.title) === normalize(content.subtopic_title));
 
           if (!match || !match.id) {
-            console.warn(
-              `⚠️ Could not match content with subtopic in batch for: ${content.subtopic_title}`
-            );
+            console.warn(`⚠️ Could not match: ${content.subtopic_title}`);
             continue;
           }
 
-          // ✅ Fetch YouTube videos if needed (based on keywords in response)
-          if (course.include_videos) {
-            const videos = await fetchYoutubeVideos(content.subtopic_keywords);  // Assuming subtopic_keywords are provided
+          // YouTube videos (if enabled)
+          if (course.include_videos && content.subtopic_keywords?.length) {
+            try {
+              const videos = await fetchYoutubeVideos(content.subtopic_keywords);
+              if (Array.isArray(videos)) {
+                const videoCollRef = coursesRef
+                  .doc(courseId)
+                  .collection("units")
+                  .doc(unitId)
+                  .collection("subtopics")
+                  .doc(match.id)
+                  .collection("videos");
 
-            // ✅ Insert video data into the "videos" table
-            for (const video of videos) {
-              await pool.query(
-                `INSERT INTO videos (subtopic_id, title, youtube_url, thumbnail, duration_sec)
-                 VALUES ($1, $2, $3, $4, $5)`,
-                [match.id, video.title, video.youtube_url, video.thumbnail, video.duration_sec]
-              );
+                for (const video of videos) {
+                  await videoCollRef.doc().set({
+                    title: video.title,
+                    youtube_url: video.youtube_url,
+                    thumbnail: video.thumbnail,
+                    duration_sec: video.duration_sec || null,
+                  });
+                }
+              }
+            } catch (e) {
+              console.error("YouTube fetch failed:", e);
             }
           }
 
-
-          await pool.query(
-            `UPDATE subtopics SET content = $1, content_generated_at = NOW() WHERE id = $2`,
-            [JSON.stringify(content), match.id]
-          );
+          // Save generated content
+          await coursesRef
+            .doc(courseId)
+            .collection("units")
+            .doc(unitId)
+            .collection("subtopics")
+            .doc(match.id)
+            .update({
+              content: content,
+              content_generated_at: new Date(),
+            });
 
           generatedCount++;
         }
 
-        await pool.query(
-          `UPDATE course_generation_status 
-           SET generated_subtopics = $1, last_updated = NOW()
-           WHERE course_id = $2`,
-          [generatedCount, courseId]
+        // Update generation status
+        await db.collection("course_generation_status").doc(courseId).set(
+          {
+            generated_subtopics: generatedCount,
+            last_updated: new Date(),
+          },
+          { merge: true }
         );
 
-        // Rate limit if needed
+        // Rate limit
         await new Promise((resolve) => setTimeout(resolve, 2000));
       }
     }
 
-    // ✅ Mark as completed
-    await pool.query(
-      `UPDATE course_generation_status 
-       SET status = 'completed', last_updated = NOW()
-       WHERE course_id = $1`,
-      [courseId]
+    // Mark as completed
+    await db.collection("course_generation_status").doc(courseId).set(
+      {
+        status: "completed",
+        last_updated: new Date(),
+      },
+      { merge: true }
     );
   } catch (err) {
-    console.error('❌ Background generation failed:', err);
-    await pool.query(
-      `UPDATE course_generation_status 
-       SET status = 'failed', last_updated = NOW()
-       WHERE course_id = $1`,
-      [courseId]
+    console.error("❌ Background generation failed:", err);
+    await db.collection("course_generation_status").doc(courseId).set(
+      {
+        status: "failed",
+        last_updated: new Date(),
+      },
+      { merge: true }
     );
   }
 };

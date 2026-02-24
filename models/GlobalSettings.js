@@ -1,56 +1,70 @@
-import { pool } from "../db/db.js";
+import { db } from "../db/firebase.js";
 
-export default class GlobalSettings {
-    // Get all global settings
-    static async getAll() {
-        const { rows } = await pool.query(`
-            SELECT key, value, description, updated_at 
-            FROM global_settings 
-            ORDER BY key
-        `);
-        return rows;
-    }
+const settingsRef = db.collection("global_settings");
 
-    // Get specific setting by key
-    static async getByKey(key) {
-        const { rows } = await pool.query(
-            'SELECT value FROM global_settings WHERE key = $1',
-            [key]
-        );
-        return rows[0]?.value || null;
-    }
+const GlobalSettings = {
+    /**
+     * Get all settings as key-value pairs
+     */
+    getAll: async () => {
+        const snapshot = await settingsRef.get();
+        const settings = {};
+        snapshot.docs.forEach((doc) => {
+            settings[doc.id] = doc.data().value;
+        });
+        return settings;
+    },
 
-    // Update setting (admin only)
-    static async update(key, value, userId) {
-        const { rows } = await pool.query(`
-            UPDATE global_settings 
-            SET value = $1, updated_by = $2, updated_at = NOW() 
-            WHERE key = $3 
-            RETURNING key, value, description, updated_at
-        `, [value, userId, key]);
-        return rows[0];
-    }
+    /**
+     * Get a single setting by key
+     */
+    getByKey: async (key) => {
+        const doc = await settingsRef.doc(key).get();
+        if (!doc.exists) return null;
+        return doc.data().value;
+    },
 
-    // Get available providers list
-    static async getAvailableProviders() {
-        const value = await this.getByKey('available_providers');
-        try {
-            return JSON.parse(value) || [];
-        } catch {
-            return ['Groq', 'Gemini', 'Cerebras']; // fallback
-        }
-    }
+    /**
+     * Update a setting (create or overwrite)
+     */
+    update: async (key, value) => {
+        await settingsRef.doc(key).set({ value }, { merge: true });
+        return { key, value };
+    },
 
-    // Get default providers
-    static async getDefaultProviders() {
-        const [outline, content] = await Promise.all([
-            this.getByKey('default_outline_provider'),
-            this.getByKey('default_content_provider')
+    /**
+     * Get default LLM provider
+     */
+    getDefaultProvider: async () => {
+        const doc = await settingsRef.doc("default_provider").get();
+        if (!doc.exists) return { provider: "Gemini", model: null };
+        return doc.data().value;
+    },
+
+    /**
+     * Get default providers (outline + content) — called by settings routes
+     */
+    getDefaultProviders: async () => {
+        const [outlineDoc, contentDoc] = await Promise.all([
+            settingsRef.doc("default_outline_provider").get(),
+            settingsRef.doc("default_content_provider").get(),
         ]);
-        
         return {
-            outline: outline || 'Groq',
-            content: content || 'Groq'
+            outlineProvider: outlineDoc.exists ? outlineDoc.data().value : "Gemini",
+            contentProvider: contentDoc.exists ? contentDoc.data().value : "Gemini",
         };
-    }
-}
+    },
+
+    /**
+     * Get available LLM providers list
+     */
+    getAvailableProviders: async () => {
+        const doc = await settingsRef.doc("available_providers").get();
+        if (!doc.exists) {
+            return ["Gemini", "Groq", "Cerebras", "GLM"];
+        }
+        return doc.data().value;
+    },
+};
+
+export default GlobalSettings;

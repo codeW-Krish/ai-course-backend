@@ -1,769 +1,228 @@
-import { pool } from "../db/db.js";
-import {OUTLINE_SYSTEM_PROMPT} from "../prompts/outlinePrompt.js";
-import { OutlineRequestSchema, LlmOutlineSchema, normalizeLlmOutline, SubtopicContentSchema, SubtopicBatchResponseSchema, RegenerateContentOutlineSchema, normalizeLlmOutlineForRegeneration } from "../llm/outlineSchemas.js";
+import { db, FieldValue } from "../db/firebase.js";
+import { OUTLINE_SYSTEM_PROMPT } from "../prompts/outlinePrompt.js";
+import {
+  OutlineRequestSchema,
+  LlmOutlineSchema,
+  normalizeLlmOutline,
+  SubtopicBatchResponseSchema,
+  RegenerateContentOutlineSchema,
+  normalizeLlmOutlineForRegeneration,
+} from "../llm/outlineSchemas.js";
 import { z } from "zod/mini";
 import { SUBTOPIC_BATCH_PROMPT } from "../prompts/SubTopicBatchPrompt.js";
 import { startBackgroundGeneration } from "../service/generationQueue.js";
-// import { getLLMProvider } from "../providers/LLMFactory.js";
 import { getLLMProvider } from "../providers/LLMProviders.js";
 import { fetchYoutubeVideos } from "../service/youtubeService.js";
-// import CerebrasProvider from "../service/cerebrasService.js";
-/*
- POST /api/courses/generate-outline
- *Requires JWT (req.user.id)
-*/
+import { grantXpOnce, touchUserDailyActivity } from "../service/gamificationService.js";
 
-export const generateCourseOutline =async (req, res) => {
+const coursesRef = db.collection("courses");
 
-    try {
+// ============================================================
+//  POST /api/courses/generate-outline
+// ============================================================
+export const generateCourseOutline = async (req, res) => {
+  try {
+    const camelBody = {
+      title: req.body.title || req.body.course_title,
+      description: req.body.description,
+      numUnits: req.body.numUnits ?? req.body.num_units,
+      difficulty: req.body.difficulty,
+      includeVideos: req.body.includeVideos ?? req.body.include_youtube ?? false,
+      provider: req.body.provider ?? "Groq",
+      model: req.body.model ?? null,
+    };
 
-        const camelBody = {
-            title: req.body.title || req.body.course_title,
-            description: req.body.description,
-            numUnits: req.body.numUnits ?? req.body.num_units,
-            difficulty: req.body.difficulty,
-            includeVideos: req.body.includeVideos ?? req.body.include_youtube ?? false,
-            provider: req.body.provider ?? "Gemini",
-            model: req.body.model ?? null,
-
-        };
-
-        const result = OutlineRequestSchema.safeParse(camelBody);
-        if(!result.success){
-            return res.status(400).json({error: "Validation Failed", fields: z.treeifyError(result.error)});
-        }
-
-        const input = result.data;
-
-        const userId = req.user?.id;
-        if(!userId) return res.status(401).json({error: "Unauthorized"});
-
-
-        const userInputs = {
-            course_title: input.title,
-            description: input.description,
-            num_units: input.numUnits,
-            difficulty: input.difficulty,
-            include_youtube: !!input.includeVideos,
-        }
-
-        const llm = getLLMProvider(input.provider, input.model);
-
-        const llmJosn = await llm(OUTLINE_SYSTEM_PROMPT, userInputs);
-
-        const normalized = normalizeLlmOutline(llmJosn);
-          // Enforce exact numUnits as requested (safety net)
-        if ((normalized.units?.length || 0) !== input.numUnits) {
-        // If mismatch, trim or regenerate; here we trim or slice/pad if needed.
-            normalized.units = (normalized.units || []).slice(0, input.numUnits);
-            if (normalized.units.length < input.numUnits) {
-                return res.status(502).json({ error: "LLM returned fewer units than requested. Try again." });
-            }
-        }
-
-        const parsed = LlmOutlineSchema.safeParse(normalized);
-        if(!parsed.success){
-            return res.status(400).json({
-            error: "Validation Failed",
-            fields: z.treeifyError(parsed.error)
-        });
-        } 
-
-        const insertQuery = `
-            INSERT INTO courses(id, created_by, title, description, difficulty, include_videos, status, outline_json, outline_generated_at, is_public, created_at)
-            VALUES(gen_random_uuid(), $1, $2, $3, $4, $5, 'draft', $6, NOW(), TRUE, NOW())
-            RETURNING id
-        `
-
-        const params = [
-            userId, 
-            input.title,
-            input.description,
-            input.difficulty,
-            !!input.includeVideos,
-            JSON.stringify(parsed.data),
-        ]
-
-        const dbres = await pool.query(insertQuery, params);
-        const courseId = dbres.rows[0].id;
-        
-
-        // Insert each unit and its subtopics
-        for (const unit of parsed.data.units) {
-        const unitInsertRes = await pool.query(
-            `INSERT INTO units (id, course_id, title, position)
-            VALUES (gen_random_uuid(), $1, $2, $3)
-            RETURNING id`,
-            [courseId, unit.title, unit.position]
-        );
-
-        const unitId = unitInsertRes.rows[0].id;
-
-        // Insert subtopics
-        let position = 1;
-        for (const subtopicTitle of unit.subtopics) {
-            await pool.query(
-            `INSERT INTO subtopics (id, unit_id, title, position)
-            VALUES (gen_random_uuid(), $1, $2, $3)`,
-            [unitId, subtopicTitle, position++]
-            );
-        }
-        }
-
-
-        return res.status(201).json({
-            courseId,
-            status: "draft",
-            outline: parsed.data,
-        });     
-    } catch (err) {
-        console.error("generateCourseOutline error:", err);
-        if (err.name === "ZodError") {
-             return res.status(400).json({ error: "Invalid request body", details: err.errors });
-        }
-        return res.status(500).json({ error: "Failed to generate outline" });
+    const result = OutlineRequestSchema.safeParse(camelBody);
+    if (!result.success) {
+      return res.status(400).json({ error: "Validation Failed", fields: z.treeifyError(result.error) });
     }
-}
 
-// export const generateCourseOutline = async (req, res) => {
-//   try {
-//     const camelBody = {
-//       title: req.body.title || req.body.course_title,
-//       description: req.body.description,
-//       numUnits: req.body.numUnits ?? req.body.num_units,
-//       difficulty: req.body.difficulty,
-//       includeVideos: req.body.includeVideos ?? req.body.include_youtube ?? false,
-//       provider: req.body.provider ?? "Gemini",
-//       model: req.body.model ?? null,
-//     };
+    const input = result.data;
+    const userId = req.user?.id;
+    if (!userId) return res.status(401).json({ error: "Unauthorized" });
 
-//     const result = OutlineRequestSchema.safeParse(camelBody);
-//     if (!result.success) {
-//       return res.status(400).json({ error: "Validation Failed", fields: z.treeifyError(result.error) });
-//     }
+    const userInputs = {
+      course_title: input.title,
+      description: input.description,
+      num_units: input.numUnits,
+      difficulty: input.difficulty,
+      include_youtube: !!input.includeVideos,
+    };
 
-//     const input = result.data;
-//     const userId = req.user?.id;
-//     if (!userId) return res.status(401).json({ error: "Unauthorized" });
+    const llm = getLLMProvider(input.provider, input.model);
+    const llmJson = await llm(OUTLINE_SYSTEM_PROMPT, userInputs);
 
-//     const userInputs = {
-//       course_title: input.title,
-//       description: input.description,
-//       num_units: input.numUnits,
-//       difficulty: input.difficulty,
-//       include_youtube: !!input.includeVideos,
-//     };
+    const normalized = normalizeLlmOutline(llmJson);
+    if ((normalized.units?.length || 0) !== input.numUnits) {
+      normalized.units = (normalized.units || []).slice(0, input.numUnits);
+      if (normalized.units.length < input.numUnits) {
+        return res.status(502).json({ error: "LLM returned fewer units than requested. Try again." });
+      }
+    }
 
-//     // === GET PROVIDER (ONLY 1 IMPORT) ===
-//     const llmProvider = getLLMProvider(input.provider);
+    const parsed = LlmOutlineSchema.safeParse(normalized);
+    if (!parsed.success) {
+      return res.status(400).json({ error: "Validation Failed", fields: z.treeifyError(parsed.error) });
+    }
 
-//     let fullResponse = "";
-//     let parsedOutline;
+    // Create course document
+    const courseRef = coursesRef.doc();
+    const courseId = courseRef.id;
 
-//     try {
-//       await llmProvider.streamContent(
-//         OUTLINE_SYSTEM_PROMPT,
-//         userInputs,
-//         (chunk) => {
-//           fullResponse += chunk;
-//           // Optional: stream to client if SSE
-//         },
-//         (err) => {
-//           throw err;
-//         }
-//       );
-
-//       const normalized = normalizeLlmOutline(JSON.parse(fullResponse));
-//       if ((normalized.units?.length || 0) !== input.numUnits) {
-//         normalized.units = (normalized.units || []).slice(0, input.numUnits);
-//         if (normalized.units.length < input.numUnits) {
-//           return res.status(502).json({ error: "LLM returned fewer units than requested." });
-//         }
-//       }
-
-//       const parsed = LlmOutlineSchema.safeParse(normalized);
-//       if (!parsed.success) {
-//         return res.status(400).json({
-//           error: "Validation Failed",
-//           fields: z.treeifyError(parsed.error)
-//         });
-//       }
-//       parsedOutline = parsed.data;
-
-//     } catch (err) {
-//       console.error("LLM Outline Generation Failed:", err);
-//       return res.status(502).json({ error: "Failed to generate outline from LLM" });
-//     }
-
-//     // === INSERT INTO DB ===
-//     const insertQuery = `
-//       INSERT INTO courses(id, created_by, title, description, difficulty, include_videos, status, outline_json, outline_generated_at, is_public, created_at)
-//       VALUES(gen_random_uuid(), $1, $2, $3, $4, $5, 'draft', $6, NOW(), TRUE, NOW())
-//       RETURNING id
-//     `;
-
-//     const params = [
-//       userId,
-//       input.title,
-//       input.description,
-//       input.difficulty,
-//       !!input.includeVideos,
-//       JSON.stringify(parsedOutline),
-//     ];
-
-//     const dbres = await pool.query(insertQuery, params);
-//     const courseId = dbres.rows[0].id;
-
-//     // === INSERT UNITS & SUBTOPICS ===
-//     for (const unit of parsedOutline.units) {
-//       const unitInsertRes = await pool.query(
-//         `INSERT INTO units (id, course_id, title, position)
-//          VALUES (gen_random_uuid(), $1, $2, $3)
-//          RETURNING id`,
-//         [courseId, unit.title, unit.position]
-//       );
-//       const unitId = unitInsertRes.rows[0].id;
-
-//       let position = 1;
-//       for (const subtopicTitle of unit.subtopics) {
-//         await pool.query(
-//           `INSERT INTO subtopics (id, unit_id, title, position)
-//            VALUES (gen_random_uuid(), $1, $2, $3)`,
-//           [unitId, subtopicTitle, position++]
-//         );
-//       }
-//     }
-
-//     return res.status(201).json({
-//       courseId,
-//       status: "draft",
-//       outline: parsedOutline,
-//     });
-
-//   } catch (err) {
-//     console.error("generateCourseOutline error:", err);
-//     if (err.name === "ZodError") {
-//       return res.status(400).json({ error: "Invalid request body", details: err.errors });
-//     }
-//     return res.status(500).json({ error: "Failed to generate outline" });
-//   }
-// };
-
-/* 
-PUT /api/course/:id/outline
-*/
-
-export const updateCourseOutline = async(req, res) => {
-    try {
-        const {id} = req.params;
-        const userId = req.user?.id;
-    
-        if(!userId) return res.status(401).json({error: "Unauthorized"});
-
-        const ownerCheck = await pool.query("SELECT created_by FROM courses WHERE id = $1", [id]);
-        if(ownerCheck.rowCount == 0) {
-            return res.status(404).json({error: "Course Not Found"});
-        }
-
-        if(ownerCheck.rows[0].created_by != userId){
-            return res.status(403).json({error: "Forbidden"});
-        }
-
-        const normalized = normalizeLlmOutline(req.body);
-        const parsed = LlmOutlineSchema.safeParse(normalized);
-        
-        if (!parsed.success) {
-            return res.status(400).json({
-        error: "Validation Failed",
-        fields: z.treeifyError(parsed.error)
+    await courseRef.set({
+      created_by: userId,
+      title: input.title,
+      description: input.description,
+      difficulty: input.difficulty,
+      include_videos: !!input.includeVideos,
+      status: "draft",
+      outline_json: parsed.data,
+      outline_generated_at: new Date(),
+      is_public: true,
+      created_at: new Date(),
     });
-        }
 
-        const updateQuery = `
-            UPDATE courses 
-            SET outline_json = $1, outline_generated_at = NOW(), status = 'draft'
-            WHERE id = $2
-        `;
+    // Insert each unit and its subtopics as subcollections
+    for (const unit of parsed.data.units) {
+      const unitRef = courseRef.collection("units").doc();
 
-        await pool.query(updateQuery, [JSON.stringify(parsed.data), id])
-        return res.json({ ok: true, courseId: id, outline: parsed.data, status: "draft" });
+      await unitRef.set({
+        title: unit.title,
+        position: unit.position,
+      });
 
-    } catch (err) {
-         console.error("updateCourseOutline error:", err);
-         return res.status(500).json({ error: "Failed to update outline" });        
+      // Insert subtopics
+      let position = 1;
+      for (const subtopicTitle of unit.subtopics) {
+        await unitRef.collection("subtopics").doc().set({
+          title: subtopicTitle,
+          position: position++,
+          content: null,
+          content_generated_at: null,
+        });
+      }
     }
-}
 
-/*
- AFTER Course content generation creator of the course can update the outline and thus we need to regenerate the content ans store it to the DB tables
+    return res.status(201).json({
+      courseId,
+      status: "draft",
+      outline: parsed.data,
+    });
+  } catch (err) {
+    console.error("generateCourseOutline error:", err);
+    if (err.name === "ZodError") {
+      return res.status(400).json({ error: "Invalid request body", details: err.errors });
+    }
+    return res.status(500).json({ error: "Failed to generate outline" });
+  }
+};
 
-*/
+// ============================================================
+//  PUT /api/course/:id/outline
+// ============================================================
+export const updateCourseOutline = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const userId = req.user?.id;
 
+    if (!userId) return res.status(401).json({ error: "Unauthorized" });
 
+    const courseDoc = await coursesRef.doc(id).get();
+    if (!courseDoc.exists) {
+      return res.status(404).json({ error: "Course Not Found" });
+    }
+    if (courseDoc.data().created_by !== userId) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
 
-// WORKING 100% PROPER USE THIS IF NEEDED
+    const normalized = normalizeLlmOutline(req.body);
+    const parsed = LlmOutlineSchema.safeParse(normalized);
 
-// export const updateExistedCourseOutlineAndRegenerateContent = async (req, res) => {
-//   const client = await pool.connect(); // Start a DB transaction
-//     const providerName = req.query.provider || 'Gemini';
-//     const model = req.query.model || undefined;
-//   try {
-//     const { id } = req.params; // courseId from the route
-//     const userId = req.user?.id;
+    if (!parsed.success) {
+      return res.status(400).json({ error: "Validation Failed", fields: z.treeifyError(parsed.error) });
+    }
 
-//     // Check if the user is authorized
-//     if (!userId) return res.status(401).json({ error: "Unauthorized" });
+    await coursesRef.doc(id).update({
+      outline_json: parsed.data,
+      outline_generated_at: new Date(),
+      status: "draft",
+    });
 
-//     // Check if the course exists and if the user is the owner
-//     const ownerCheck = await pool.query("SELECT created_by, outline_json FROM courses WHERE id = $1", [id]);
-//     if (ownerCheck.rowCount === 0) {
-//       return res.status(404).json({ error: "Course Not Found" });
-//     }
+    return res.json({ ok: true, courseId: id, outline: parsed.data, status: "draft" });
+  } catch (err) {
+    console.error("updateCourseOutline error:", err);
+    return res.status(500).json({ error: "Failed to update outline" });
+  }
+};
 
-//     if (ownerCheck.rows[0].created_by !== userId) {
-//       return res.status(403).json({ error: "Forbidden" });
-//     }
-
-//     // Normalize the incoming outline (to ensure it's in the correct format)
-//     const normalized = normalizeLlmOutlineForRegeneration(req.body);
-//     console.log("Normalized: ", normalized);
-
-//     const parsed = RegenerateContentOutlineSchema.safeParse(normalized);
-    
-//     if (!parsed.success) {
-//       return res.status(400).json({
-//         error: "Validation Failed",
-//         fields: z.treeifyError(parsed.error),
-//       });
-//     }
-
-//     // Step 1: Fetch the existing units to associate unit_id
-//     const unitsQuery = `SELECT id, title FROM units WHERE course_id = $1`;
-//     const unitsResult = await pool.query(unitsQuery, [id]);
-//     const existingUnits = unitsResult.rows;
-
-//     // Step 2: Ensure each unit has an id assigned, insert new units if necessary
-//     const newOutline = [];
-
-//     for (const unit of parsed.data.units) {
-//       let existingUnit = existingUnits.find(existing => existing.title === unit.title);
-      
-//       if (!existingUnit) {
-//         // Insert the new unit into the database
-//         const insertUnitQuery = `
-//           INSERT INTO units (course_id, title, position)
-//           VALUES ($1, $2, $3) RETURNING id
-//         `;
-//         const insertResult = await pool.query(insertUnitQuery, [id, unit.title, unit.position]);
-//         existingUnit = { id: insertResult.rows[0].id, title: unit.title };  // Get the new unit id
-//       }
-      
-//       unit.id = existingUnit.id;
-//       newOutline.push(unit); // Add the unit with the correct id to the new outline
-//     }
-
-//     // Step 3: Handle subtopics (insert, update, delete)
-//     const existingSubtopicsQuery = `
-//       SELECT u.id AS unit_id, s.id AS subtopic_id, s.title AS subtopic_title 
-//       FROM units u
-//       JOIN subtopics s ON u.id = s.unit_id
-//       WHERE u.course_id = $1
-//     `;
-//     const currentOutline = await pool.query(existingSubtopicsQuery, [id]);
-//     const existingSubtopics = currentOutline.rows;
-
-//     const toInsertSubtopics = [];
-//     const toUpdateSubtopics = [];
-//     const toDeleteSubtopics = [];
-
-//     // Traverse the new outline and compare subtopics with existing ones in DB
-//     for (const unit of newOutline) {
-//       for (const [index, subtopicTitle] of unit.subtopics.entries()) {
-//         const dbSubtopic = existingSubtopics.find(
-//           (sub) => sub.subtopic_title === subtopicTitle && sub.unit_id === unit.id
-//         );
-
-//         if (dbSubtopic) {
-//           // Subtopic exists, check if it needs updating
-//           if (dbSubtopic.subtopic_title !== subtopicTitle) {
-//             toUpdateSubtopics.push({
-//               id: dbSubtopic.subtopic_id,
-//               unit_id: unit.id,
-//               new_title: subtopicTitle,
-//               position: index + 1,
-//             });
-//           }
-//         } else {
-//           // New subtopic, insert it with position based on order in array
-//           toInsertSubtopics.push({
-//             unit_id: unit.id,
-//             subtopic_title: subtopicTitle,
-//             position: index + 1,
-//           });
-//         }
-//       }
-//     }
-
-//     // Handle subtopics deletion (those that no longer exist in the new outline)
-//     for (const dbSubtopic of existingSubtopics) {
-//       const foundInNewOutline = newOutline
-//         .flatMap((unit) => unit.subtopics)
-//         .includes(dbSubtopic.subtopic_title);
-        
-//       if (!foundInNewOutline) {
-//         toDeleteSubtopics.push(dbSubtopic.subtopic_id);
-//       }
-//     }
-
-//     // Step 4: Start transaction
-//     await client.query('BEGIN');
-
-//     // Step 5: Delete subtopics that are no longer present
-//     const deleteSubtopicsPromises = toDeleteSubtopics.map(subtopicId =>
-//       client.query('DELETE FROM subtopics WHERE id = $1', [subtopicId])
-//     );
-//     await Promise.all(deleteSubtopicsPromises);
-
-//     // Step 6: Insert new subtopics
-//     const insertSubtopics = toInsertSubtopics.map(subtopic => [
-//       subtopic.unit_id,
-//       subtopic.subtopic_title,
-//       subtopic.position
-//     ]);
-//     const insertQuery = `
-//       INSERT INTO subtopics (unit_id, title, position)
-//       VALUES ($1, $2, $3)  
-//     `;
-//     const insertPromises = insertSubtopics.map(subtopic =>
-//       client.query(insertQuery, subtopic)
-//     );
-//     await Promise.all(insertPromises);  // Insert new subtopics
-
-//     // Step 7: Generate content for new subtopics using LLM
-//     const llm = getLLMProvider(providerName, model);
-//     const subtopicsTitles = toInsertSubtopics.map(sub => sub.subtopic_title);
-//     const batchInput = {
-//       course_title: req.body.course_title,
-//       unit_title: req.body.unit_title,
-//       subtopics: subtopicsTitles,
-//       difficulty: req.body.difficulty,
-//       want_youtube_keywords: req.body.want_youtube_keywords || false,
-//     };
-    
-//     const generatedContents = await llm(SUBTOPIC_BATCH_PROMPT, batchInput);
-
-//     // Step 8: Insert generated content into subtopics
-//     const contentUpdatePromises = generatedContents.map((content, idx) =>
-//       client.query(
-//         'UPDATE subtopics SET content = $1 WHERE title = $2 AND unit_id = $3',
-//         [JSON.stringify(content), toInsertSubtopics[idx].subtopic_title, toInsertSubtopics[idx].unit_id]
-//       )
-//     );
-//     await Promise.all(contentUpdatePromises);
-
-//     // Step 10: Update the course outline in the database
-//     const updatedOutline = {
-//       course_title: req.body.course_title,
-//       difficulty: req.body.difficulty,
-//       units: newOutline, // Only include units with subtopics
-//     };
-
-//     // Update the course outline in the database
-//     await client.query(
-//       `UPDATE courses SET outline_json = $1 WHERE id = $2`,
-//       [JSON.stringify(updatedOutline), id]
-//     );
-
-//     // Commit the transaction
-//     await client.query('COMMIT');
-
-//     return res.json({
-//       status: "draft",
-//       outline: updatedOutline,
-//       courseId: id,
-//     });
-
-//   } catch (err) {
-//     await client.query('ROLLBACK');
-//     console.error("updateCourseOutline error:", err);
-//     return res.status(500).json({ error: "Failed to update outline" });
-//   } finally {
-//     client.release();
-//   }
-// };
-
-
-// export const updateOrRegenerateCourseOutline = async (req, res, regenerateContent = false) => {
-//   const client = await pool.connect();
-//   const providerName = req.query.provider || 'Gemini';
-//   const model = req.query.model || undefined;
-//   const { id } = req.params;
-//   const userId = req.user?.id;
-
-//   if (!userId) return res.status(401).json({ error: "Unauthorized" });
-
-//   const ownerCheck = await pool.query("SELECT created_by FROM courses WHERE id = $1", [id]);
-//   if (ownerCheck.rowCount === 0) return res.status(404).json({ error: "Course Not Found" });
-//   if (ownerCheck.rows[0].created_by !== userId) return res.status(403).json({ error: "Forbidden" });
-
-//   const normalized = normalizeLlmOutlineForRegeneration(req.body);
-//   const parsed = RegenerateContentOutlineSchema.safeParse(normalized);
-//   if (!parsed.success) {
-//     return res.status(400).json({ error: "Validation Failed", fields: z.treeifyError(parsed.error) });
-//   }
-
-//   // === FETCH EXISTING STRUCTURE ===
-//   const unitsResult = await pool.query(`SELECT id, title FROM units WHERE course_id = $1`, [id]);
-//   const existingUnits = unitsResult.rows;
-
-//   const subtopicsResult = await pool.query(`
-//     SELECT u.id AS unit_id, s.id AS subtopic_id, s.title 
-//     FROM units u JOIN subtopics s ON u.id = s.unit_id WHERE u.course_id = $1
-//   `, [id]);
-//   const existingSubtopics = subtopicsResult.rows;
-
-//   const newOutline = [];
-//   const toInsertSubtopics = [];
-//   const toUpdateSubtopics = [];
-//   const toDeleteSubtopics = [];
-
-//   // === PROCESS UNITS ===
-//   for (const unit of parsed.data.units) {
-//     let existingUnit = existingUnits.find(u => u.title === unit.title);
-//     if (!existingUnit) {
-//       const insertRes = await pool.query(
-//         `INSERT INTO units (course_id, title, position) VALUES ($1, $2, $3) RETURNING id`,
-//         [id, unit.title, unit.position]
-//       );
-//       existingUnit = { id: insertRes.rows[0].id, title: unit.title };
-//     }
-//     unit.id = existingUnit.id;
-//     newOutline.push(unit);
-//   }
-
-//   // === PROCESS SUBTOPICS ===
-//   for (const unit of newOutline) {
-//     for (const [idx, title] of unit.subtopics.entries()) {
-//       const existing = existingSubtopics.find(s => s.title === title && s.unit_id === unit.id);
-//       if (existing) {
-//         if (existing.title !== title) {
-//           toUpdateSubtopics.push({ id: existing.subtopic_id, title, position: idx + 1 });
-//         }
-//       } else {
-//         toInsertSubtopics.push({ unit_id: unit.id, title, position: idx + 1 });
-//       }
-//     }
-//   }
-
-//   for (const sub of existingSubtopics) {
-//     const exists = newOutline.some(u => u.subtopics.includes(sub.title));
-//     if (!exists) toDeleteSubtopics.push(sub.subtopic_id);
-//   }
-
-//   // === DB TRANSACTION ===
-//   try {
-//     await client.query('BEGIN');
-
-//     // Delete
-//     await Promise.all(toDeleteSubtopics.map(id => client.query('DELETE FROM subtopics WHERE id = $1', [id])));
-
-//     // Insert
-//     await Promise.all(
-//       toInsertSubtopics.map(s =>
-//         client.query(
-//           `INSERT INTO subtopics (unit_id, title, position) VALUES ($1, $2, $3)`,
-//           [s.unit_id, s.title, s.position]
-//         )
-//       )
-//     );
-
-//     // Update
-//     await Promise.all(
-//       toUpdateSubtopics.map(s =>
-//         client.query(
-//           `UPDATE subtopics SET title = $1, position = $2 WHERE id = $3`,
-//           [s.title, s.position, s.id]
-//         )
-//       )
-//     );
-
-//     // === REGENERATE CONTENT (STREAMING) ===
-//     if (regenerateContent && toInsertSubtopics.length > 0) {
-//       const llmProvider = getLLMProvider(providerName);
-//       const courseRes = await pool.query(`SELECT title, difficulty, include_videos FROM courses WHERE id = $1`, [id]);
-//       const course = courseRes.rows[0];
-
-//       for (const sub of toInsertSubtopics) {
-//         const unit = newOutline.find(u => u.id === sub.unit_id);
-//         const input = {
-//           course_title: course.title,
-//           unit_title: unit.title,
-//           subtopic_title: sub.title,
-//           difficulty: course.difficulty || "Beginner",
-//           want_youtube_keywords: course.include_videos
-//         };
-
-//         let fullContent = "";
-//         try {
-//           await llmProvider.streamContent(
-//             SUBTOPIC_SINGLE_PROMPT,
-//             input,
-//             (chunk) => fullContent += chunk,
-//             (err) => { throw err; }
-//           );
-
-//           const parsedContent = SubtopicResponseSchema.safeParse(JSON.parse(fullContent));
-//           if (!parsedContent.success) continue;
-
-//           const content = parsedContent.data;
-
-//           await client.query(
-//             `UPDATE subtopics SET content = $1, content_generated_at = NOW() WHERE title = $2 AND unit_id = $3`,
-//             [JSON.stringify(content), sub.title, sub.unit_id]
-//           );
-
-//           // Background YouTube
-//           if (course.include_videos && content.youtube_keywords?.length) {
-//             (async () => {
-//               try {
-//                 const videos = await fetchYoutubeVideos(content.youtube_keywords);
-//                 for (const v of videos) {
-//                   const exists = await pool.query(
-//                     `SELECT 1 FROM videos WHERE youtube_url = $1 AND subtopic_id = (
-//                       SELECT id FROM subtopics WHERE title = $2 AND unit_id = $3 LIMIT 1
-//                     )`,
-//                     [v.youtube_url, sub.title, sub.unit_id]
-//                   );
-//                   if (exists.rowCount === 0) {
-//                     await pool.query(
-//                       `INSERT INTO videos (subtopic_id, title, youtube_url, thumbnail, duration_sec)
-//                        VALUES ((SELECT id FROM subtopics WHERE title = $1 AND unit_id = $2), $3, $4, $5, $6)`,
-//                       [sub.title, sub.unit_id, v.title, v.youtube_url, v.thumbnail, v.duration_sec]
-//                     );
-//                   }
-//                 }
-//               } catch (e) { /* ignore */ }
-//             })();
-//           }
-
-//         } catch (err) {
-//           console.error("Content gen failed for:", sub.title, err);
-//         }
-//       }
-//     }
-
-//     // === UPDATE OUTLINE JSON ===
-//     const updatedOutline = {
-//       course_title: req.body.course_title || (await pool.query(`SELECT title FROM courses WHERE id = $1`, [id])).rows[0].title,
-//       difficulty: req.body.difficulty,
-//       units: newOutline.map(u => ({ title: u.title, position: u.position, subtopics: u.subtopics }))
-//     };
-
-//     await client.query(`UPDATE courses SET outline_json = $1 WHERE id = $2`, [JSON.stringify(updatedOutline), id]);
-//     await client.query('COMMIT');
-
-//     return res.json({ status: "draft", outline: updatedOutline, courseId: id });
-
-//   } catch (err) {
-//     await client.query('ROLLBACK');
-//     throw err;
-//   } finally {
-//     client.release();
-//   }
-// };
-
-
-//--------------------------------------------------------------------------------------
+// ============================================================
+//  PUT/POST  — Update or Regenerate Course Outline (with content)
+// ============================================================
 export const updateOrRegenerateCourseOutline = async (req, res, regenerateContent = false) => {
-  const client = await pool.connect(); // Start DB transaction
-  const providerName = req.query.provider || 'Gemini';  // Optional: specify the LLM provider
-  const model = req.query.model || undefined;  // Optional: specify the model to use for content generation
-  const { id } = req.params;  // courseId from the route
+  const providerName = req.body.provider || req.query.provider || "Groq";
+  const model = req.body.model || req.query.model || undefined;
+  const { id } = req.params;
   const userId = req.user?.id;
-  
-  // Check if the user is authorized
+
   if (!userId) return res.status(401).json({ error: "Unauthorized" });
-  
-  // Check if the course exists and if the user is the owner
-  const ownerCheck = await pool.query("SELECT created_by, outline_json FROM courses WHERE id = $1", [id]);
-  if (ownerCheck.rowCount === 0) {
+
+  const courseDoc = await coursesRef.doc(id).get();
+  if (!courseDoc.exists) {
     return res.status(404).json({ error: "Course Not Found" });
   }
-  
-  if (ownerCheck.rows[0].created_by !== userId) {
+  if (courseDoc.data().created_by !== userId) {
     return res.status(403).json({ error: "Forbidden" });
   }
-  
-  // Normalize the incoming outline (to ensure it's in the correct format)
+
   const normalized = normalizeLlmOutlineForRegeneration(req.body);
-  console.log("Normalized: ",  JSON.stringify(normalized, null, 2));
+  console.log("Normalized: ", JSON.stringify(normalized, null, 2));
 
   const parsed = RegenerateContentOutlineSchema.safeParse(normalized);
-  
   if (!parsed.success) {
-    return res.status(400).json({
-      error: "Validation Failed",
-      fields: z.treeifyError(parsed.error),
-    });
+    return res.status(400).json({ error: "Validation Failed", fields: z.treeifyError(parsed.error) });
   }
-  
-  // Step 1: Fetch the existing units and subtopics from the database
-  const unitsQuery = `SELECT id, title FROM units WHERE course_id = $1`;
-  const unitsResult = await pool.query(unitsQuery, [id]);
-  const existingUnits = unitsResult.rows;
-  
-  const existingSubtopicsQuery = `
-  SELECT u.id AS unit_id, s.id AS subtopic_id, s.title AS subtopic_title 
-  FROM units u
-  JOIN subtopics s ON u.id = s.unit_id
-  WHERE u.course_id = $1
-  `;
-  const currentOutline = await pool.query(existingSubtopicsQuery, [id]);
-  const existingSubtopics = currentOutline.rows;
 
-  // Step 2: Insert or Update Units in the Outline
-  const newOutline = [];
-  
-  for (const unit of parsed.data.units) {
-    let existingUnit = existingUnits.find(existing => existing.title === unit.title);
-    
-    if (!existingUnit) {
-      // Insert the new unit into the database
-      const insertUnitQuery = `
-      INSERT INTO units (course_id, title, position)
-      VALUES ($1, $2, $3) RETURNING id
-      `;
-      const insertResult = await pool.query(insertUnitQuery, [id, unit.title, unit.position]);
-      existingUnit = { id: insertResult.rows[0].id, title: unit.title };  // Get the new unit id
+  // Step 1: Fetch existing units and subtopics
+  const unitsSnapshot = await coursesRef.doc(id).collection("units").get();
+  const existingUnits = unitsSnapshot.docs.map((d) => ({ id: d.id, ...d.data() }));
+
+  const existingSubtopics = [];
+  for (const unitDoc of unitsSnapshot.docs) {
+    const subSnap = await coursesRef.doc(id).collection("units").doc(unitDoc.id).collection("subtopics").get();
+    for (const subDoc of subSnap.docs) {
+      existingSubtopics.push({
+        unit_id: unitDoc.id,
+        subtopic_id: subDoc.id,
+        subtopic_title: subDoc.data().title,
+      });
     }
-    
-    unit.id = existingUnit.id;
-    newOutline.push(unit);  // Add the unit with the correct id to the new outline
   }
-  
-  // Step 3: Handle Subtopics (Insert, Update, Delete)
+
+  // Step 2: Match / insert units
+  const newOutline = [];
+  for (const unit of parsed.data.units) {
+    let existingUnit = existingUnits.find((u) => u.title === unit.title);
+
+    if (!existingUnit) {
+      const newUnitRef = coursesRef.doc(id).collection("units").doc();
+      await newUnitRef.set({ title: unit.title, position: unit.position });
+      existingUnit = { id: newUnitRef.id, title: unit.title };
+    }
+
+    unit.id = existingUnit.id;
+    newOutline.push(unit);
+  }
+
+  // Step 3: Handle subtopics (insert/delete)
   const toInsertSubtopics = [];
-  const toUpdateSubtopics = [];
   const toDeleteSubtopics = [];
-  
+
   for (const unit of newOutline) {
     for (const [index, subtopicTitle] of unit.subtopics.entries()) {
-      const dbSubtopic = existingSubtopics.find(
+      const found = existingSubtopics.find(
         (sub) => sub.subtopic_title === subtopicTitle && sub.unit_id === unit.id
       );
-      
-      if (dbSubtopic) {
-        // Subtopic exists, check if it needs updating
-        if (dbSubtopic.subtopic_title !== subtopicTitle) {
-          toUpdateSubtopics.push({
-            id: dbSubtopic.subtopic_id,
-            unit_id: unit.id,
-            new_title: subtopicTitle,
-            position: index + 1,
-          });
-        }
-      } else {
-        // New subtopic, insert it with position based on order in array
+      if (!found) {
         toInsertSubtopics.push({
           unit_id: unit.id,
           subtopic_title: subtopicTitle,
@@ -772,1744 +231,705 @@ export const updateOrRegenerateCourseOutline = async (req, res, regenerateConten
       }
     }
   }
-  
-  // Handle subtopics deletion (those that no longer exist in the new outline)
+
   for (const dbSubtopic of existingSubtopics) {
     const foundInNewOutline = newOutline
-    .flatMap((unit) => unit.subtopics)
-    .includes(dbSubtopic.subtopic_title);
-    
+      .flatMap((unit) => unit.subtopics)
+      .includes(dbSubtopic.subtopic_title);
     if (!foundInNewOutline) {
-      toDeleteSubtopics.push(dbSubtopic.subtopic_id);
+      toDeleteSubtopics.push({ unit_id: dbSubtopic.unit_id, subtopic_id: dbSubtopic.subtopic_id });
     }
   }
-  
-  // Step 4: Start Database Transaction
-  await client.query('BEGIN');
-  
-  // Step 5: Delete subtopics that no longer exist
-  const deleteSubtopicsPromises = toDeleteSubtopics.map(subtopicId =>
-    client.query('DELETE FROM subtopics WHERE id = $1', [subtopicId])
-  );
-  await Promise.all(deleteSubtopicsPromises);
-  
-  // Step 6: Insert new subtopics
-  const insertSubtopics = toInsertSubtopics.map(subtopic => [
-    subtopic.unit_id,
-    subtopic.subtopic_title,
-    subtopic.position
-  ]);
-  const insertQuery = `
-    INSERT INTO subtopics (unit_id, title, position)
-    VALUES ($1, $2, $3)  
-  `;
-  const insertPromises = insertSubtopics.map(subtopic =>
-    client.query(insertQuery, subtopic)
-  );
-  await Promise.all(insertPromises);  // Insert new subtopics
 
-  // Step 7: Update existing subtopics
-  const updateSubtopicsPromises = toUpdateSubtopics.map(subtopic =>
-    client.query(
-      'UPDATE subtopics SET title = $1, position = $2 WHERE id = $3',
-      [subtopic.new_title, subtopic.position, subtopic.id]
-    )
-  );
-  await Promise.all(updateSubtopicsPromises); // Update existing subtopics
-  
-  // Step 8: Generate content for new subtopics using LLM (optional)
-  if (regenerateContent) {
-    const llm = getLLMProvider(providerName, model);
-    const subtopicsTitles = toInsertSubtopics.map(sub => sub.subtopic_title);
-    const batchInput = {
-      course_title: req.body.course_title,
-      unit_title: req.body.unit_title,
-      subtopics: subtopicsTitles,
-      difficulty: req.body.difficulty,
-      want_youtube_keywords: req.body.want_youtube_keywords || false,
-    };
-    
-    const generatedContents = await llm(SUBTOPIC_BATCH_PROMPT, batchInput);
-    
-    // Step 9: Insert generated content into subtopics
-    const contentUpdatePromises = generatedContents.map((content, idx) =>
-      client.query(
-        'UPDATE subtopics SET content = $1 WHERE title = $2 AND unit_id = $3',
-        [JSON.stringify(content), toInsertSubtopics[idx].subtopic_title, toInsertSubtopics[idx].unit_id]
-      )
-    );
-    await Promise.all(contentUpdatePromises);
+  // Batch write: delete and insert subtopics
+  const batch = db.batch();
+
+  for (const sub of toDeleteSubtopics) {
+    const ref = coursesRef.doc(id).collection("units").doc(sub.unit_id).collection("subtopics").doc(sub.subtopic_id);
+    batch.delete(ref);
   }
-  
-  // Step 10: Update the course outline in the database
-  const updatedOutline = {
-    course_title: req.body.course_title,
-    difficulty: req.body.difficulty,
-    units: newOutline, // Only include units with subtopics
-  };
-  
-  await client.query(
-    `UPDATE courses SET outline_json = $1 WHERE id = $2`,
-    [JSON.stringify(updatedOutline), id]
-  );
-  
-  // Commit the transaction
-  await client.query('COMMIT');
 
-  return res.json({
+  for (const sub of toInsertSubtopics) {
+    const ref = coursesRef.doc(id).collection("units").doc(sub.unit_id).collection("subtopics").doc();
+    batch.set(ref, {
+      title: sub.subtopic_title,
+      position: sub.position,
+      content: null,
+      content_generated_at: null,
+    });
+  }
+
+  await batch.commit();
+
+  // Update course outline_json
+  await coursesRef.doc(id).update({
+    outline_json: parsed.data,
+    outline_generated_at: new Date(),
     status: "draft",
-    outline: updatedOutline,
-    courseId: id,
   });
+
+  // If regenerateContent, start background generation for new subtopics
+  if (regenerateContent && toInsertSubtopics.length > 0) {
+    const llm = getLLMProvider(providerName, model);
+
+    for (const sub of toInsertSubtopics) {
+      const unitDoc = await coursesRef.doc(id).collection("units").doc(sub.unit_id).get();
+      const unitTitle = unitDoc.data()?.title || "";
+
+      const batchInput = {
+        course_title: courseDoc.data().title,
+        unit_title: unitTitle,
+        subtopics: [sub.subtopic_title],
+        difficulty: courseDoc.data().difficulty || "Beginner",
+        want_youtube_keywords: courseDoc.data().include_videos || false,
+      };
+
+      try {
+        const batchRes = await llm(SUBTOPIC_BATCH_PROMPT, batchInput);
+        if (batchRes && Array.isArray(batchRes)) {
+          const parsedContent = SubtopicBatchResponseSchema.safeParse(batchRes);
+          if (parsedContent.success) {
+            for (const content of parsedContent.data) {
+              // Find the subtopic doc we just inserted
+              const subSnap = await coursesRef
+                .doc(id)
+                .collection("units")
+                .doc(sub.unit_id)
+                .collection("subtopics")
+                .where("title", "==", content.subtopic_title)
+                .limit(1)
+                .get();
+
+              if (!subSnap.empty) {
+                await subSnap.docs[0].ref.update({
+                  content: content,
+                  content_generated_at: new Date(),
+                });
+              }
+            }
+          }
+        }
+      } catch (err) {
+        console.error(`Content generation failed for subtopic: ${sub.subtopic_title}`, err);
+      }
+    }
+  }
+
+  const updatedOutline = parsed.data;
+  return res.json({ status: "draft", outline: updatedOutline, courseId: id });
 };
-//--------------------------------------------------------------------------------------
 
 export const updateOrRegenerateCourseOutlineController = async (req, res) => {
-  const regenerateContent = req.query.regenerate === 'true';
-  
+  const regenerateContent = req.query.regenerate === "true";
   try {
-    // The service handles the database operations and response
     await updateOrRegenerateCourseOutline(req, res, regenerateContent);
   } catch (err) {
-    console.error('Error:', err);
-    res.status(500).json({ error: 'Failed to update course outline' });
+    console.error("Error:", err);
+    res.status(500).json({ error: "Failed to update course outline" });
   }
 };
 
-/* 
- GET /api/courses -> to get all the public courses 
-*/
+// ============================================================
+//  GET /api/courses
+// ============================================================
+export const getAllPublicCourses = async (req, res) => {
+  try {
+    const snapshot = await coursesRef
+      .where("is_public", "==", true)
+      .orderBy("created_at", "desc")
+      .get();
 
-export const getAllPublicCourses = async(req, res) => {
-    try {
-        const selectQuery = `
-            SELECT id, title, description, difficulty, include_videos, created_by, outline_json, created_at
-            FROM courses 
-            WHERE is_public = TRUE
-            ORDER BY created_at DESC
-        `;
+    const courses = snapshot.docs.map((doc) => ({
+      id: doc.id,
+      ...doc.data(),
+    }));
 
-        const result = await pool.query(selectQuery);
-        return res.status(200).json({courses: result.rows});
+    return res.status(200).json({ courses });
+  } catch (err) {
+    console.error("getAllPublicCourses error:", err);
+    return res.status(500).json({ error: "Failed to fetch courses" });
+  }
+};
 
-    } catch (err) {
-         console.error("getAllPublicCourses error:", err);
-         return res.status(500).json({ error: "Failed to fetch courses" });
-    }
-}
-
-
-export const getCoursesCreatedByMe = async(req, res) => {
-    try {
-        const userId = req.user?.id;
-        if(!userId) return res.status(401).json({error: "Unauthorized"});
-
-        const sql = `
-            SELECT id, title, description, difficulty, include_videos, status, is_public, created_at
-            FROM courses
-            WHERE created_by = $1
-            ORDER BY created_at DESC
-        `;
-
-        const result = await pool.query(sql, [userId]);
-        return res.status(200).json({ myCourses: result.rows });
-    } catch (err) {
-        console.error("getMyCourses error:", err);
-        return res.status(500).json({ error: "Failed to fetch your courses" });
-    }
-}
-
-
-
-
-/* 
- POST /api/courses/:id/enroll -> to enroll into course
-*/
-
-export const enrollInCourse = async(req, res) => {
-        const userId = req.user?.id;
-        const courseId = req.params.id;
-
-        if(!userId) {
-            return res.status(401).json({error: "Unauthorized"});
-        }
-
-    //     const courseExists = await pool.query(
-    //         "SELECT 1 FROM courses WHERE id = $1",
-    //         [courseId]
-    //     );
-
-    //     if (courseExists.rowCount === 0) {
-    //         return res.status(404).json({ error: "Course not found" });
-    //     }
-
-    //     const exists = await pool.query("SELECT 1 FROM user_courses WHERE user_id = $1 AND course_id = $2", [userId, courseId]);
-
-    //     if(exists.rowCount > 0){
-    //         return res.status(409).json({ error: "Already enrolled" });
-    //     }
-
-
-    //     // if not already enrolled then enroll 
-    //     await pool.query("INSERT INTO user_courses(user_id, course_id) VALUES($1, $2)", [userId, courseId]);
-    //     return res.status(200).json({message: "Enrolled Successfullty"});
-
-    // } catch (err) {
-    //     console.error("enrollInCourse error:", err);
-    //     return res.status(500).json({ error: "Failed to enroll" });
-    // }
-
-    const client = await pool.connect();
-    try {
-        await client.query("BEGIN");
-
-        const courseExistAndPublic = await client.query(`
-                SELECT is_public FROM courses 
-                WHERE id = $1
-            `, [courseId]);
-            
-        if (courseExistAndPublic.rowCount === 0) {
-            // await client.query("ROLLBACK");
-            return res.status(404).json({error: "Course doesn't exist"});
-        }
-
-        if (!courseExistAndPublic.rows[0].is_public) {
-            // await client.query("ROLLBACK");
-            return res.status(403).json({error: "Can't Enroll in this course it's not public"});
-        }
-
-        // if already enrolled
-        const enrollmentCheck = await client.query(`SELECT 1 FROM user_courses WHERE user_id = $1 AND course_id = $2`, [userId, courseId]); 
-        if (enrollmentCheck.rowCount > 0) {
-            // await client.query("ROLLBACK");
-            return res.status(409).json({error: "Already Enrolled"});
-        }
-
-            // Enroll user in course
-        await client.query(
-        "INSERT INTO user_courses(user_id, course_id) VALUES ($1, $2)",
-        [userId, courseId]
-        );
-
-        // Update course_public_stats total_users_joined counter
-        await client.query(`
-        INSERT INTO course_public_stats(course_id, total_users_joined, last_updated)
-        VALUES ($1, 1, NOW())
-        ON CONFLICT (course_id)
-        DO UPDATE SET total_users_joined = course_public_stats.total_users_joined + 1, last_updated = NOW()
-        `, [courseId]);
-
-        await client.query("COMMIT");
-        return res.status(200).json({ message: "Enrolled Successfully" });
-    } catch (err) {
-        await client.query('ROLLBACK');
-        console.error("enrollInCourse error:", err);
-        return res.status(500).json({ error: "Failed to enroll" });
-    } finally {
-        client.release();
-    }
-}
-
-/* 
- GET /api/courses/me/enrolled -> get all the courses enrolled by me, only for card view not the data of units and subtopic content
-*/
-
-export const getCoursesEnrolledByMe = async(req, res) => {
-    try {
-        const userId = req.user?.id;
-        if(!userId){
-            return res.status(401).json({error: "Unauthorized"});
-        }
-
-        // const getEnrolledCoursesQuery = `
-        //     SELECT 
-        //         c.id,
-        //         c.title,
-        //         c.description,
-        //         c.difficulty,
-        //         c.include_videos,
-        //         c.status,
-        //         c.created_by,
-        //         c.outline_json,
-        //         uc.joined_at
-        //     FROM user_courses uc
-        //     JOIN courses c ON uc.course_id = c.id
-        //     WHERE uc.user_id = $1
-        //     ORDER BY uc.joined_at DESC 
-        // `
-
-        const getEnrolledCoursesQuery = `
-                SELECT 
-                    c.id,
-                    c.title,
-                    c.description,
-                    c.difficulty,
-                    c.include_videos,
-                    c.status,
-                    c.created_by,
-                    c.outline_json,
-                    u.username AS creator_name,
-                    COALESCE(stats.total_users_joined, 0) AS total_users_joined,
-                    uc.joined_at
-                FROM user_courses uc
-                JOIN courses c ON uc.course_id = c.id
-                LEFT JOIN users u ON c.created_by = u.id
-                LEFT JOIN course_public_stats stats ON c.id = stats.course_id
-                WHERE uc.user_id = $1 
-                ORDER BY uc.joined_at DESC
-
-        `
-        
-        const result = await pool.query(getEnrolledCoursesQuery, [userId]);
-        return res.status(200).json({enrolledCourses: result.rows})
-
-    } catch (err) {
-        console.error("getEnrolledCourses error:", err);
-        return res.status(500).json({ error: "Failed to fetch enrolled courses" });
-    }
-}
-
-/*
-GET -> /api/courses/:id/outline
-*/
-
-export const getCourseOutline = async(req, res) => {
-    const courseId = req.params.id;
-    try {
-        const result = await pool.query(`        
-                SELECT outline_json FROM courses WHERE id = $1 AND is_public = TRUE
-        `, [courseId]);
-
-        if (result.rowCount === 0) {
-            return res.status(404).json({error: "Course not found or not public"});            
-        }
-
-        return res.status(200).json({outline: result.rows[0].outline_json});
-    } catch (err) {
-        console.error("getCourseOutlineOnly error:", err);
-        return res.status(500).json({ error: "Failed to fetch course outline" });
-    }
-}
-
-/*
-  DELETE -> /api/courses/:id
-*/
-
-export const deleteCourseById = async(req, res) => {
+// ============================================================
+//  GET /api/courses/me
+// ============================================================
+export const getCoursesCreatedByMe = async (req, res) => {
+  try {
     const userId = req.user?.id;
-    const courseId = req.params.id;
+    if (!userId) return res.status(401).json({ error: "Unauthorized" });
 
-    if (!userId) return res.status(401).json({error: "Unauthorized"});
+    const snapshot = await coursesRef
+      .where("created_by", "==", userId)
+      .orderBy("created_at", "desc")
+      .get();
 
-    try {
-        const checkOwnerShip = await pool.query(`
-            SELECT created_by FROM courses WHERE id = $1  
-        `, [courseId]);
+    const myCourses = snapshot.docs.map((doc) => ({
+      id: doc.id,
+      ...doc.data(),
+    }));
 
-        if (checkOwnerShip.rowCount === 0) return res.status(404).json({error: "Course Not Found"});
+    return res.status(200).json({ myCourses });
+  } catch (err) {
+    console.error("getMyCourses error:", err);
+    return res.status(500).json({ error: "Failed to fetch your courses" });
+  }
+};
 
-        if (checkOwnerShip.rows[0].created_by != userId) {
-            return res.status(403).json({error: "You're not allowed to delete this course, you're not the owner of the course"});
-        }
-
-        await pool.query(`DELETE FROM courses WHERE id = $1`, [courseId]);
-        
-        return res.status(200).json({message: "Course Deleted Successfully"});
-    } catch (err) {
-        console.error("deleteCourseById error:", err);
-        return res.status(500).json({ error: "Failed to delete course" });
-    }
-}
-
-
-/*
- GET /api/courses/:id/full -> to get teh data on the on click of the card
-*/
-
-// export const getCourseContentById = async(req,res) => {
-//     const courseId = req.params.id;
-//     const userId = req.user?.id;
-
-//     if(!userId){
-//         return res.status(401).json({error: "Unauthorized"});
-//     }
-
-//     try {
-//         // const isAccessAble = await pool.query(`
-//         //     SELECT * FROM courses
-//         //     WHERE id = $1 AND (created_by = $2 OR id IN (
-//         //     SELECT course_id FROM user_courses WHERE user_id = $2
-//         //         ))
-
-//         //     `,[courseId, userId]);
-
-//         // if(isAccessAble.rowCount === 0){
-//         //     return res.status(403).json({ error: "Access denied to this course" });
-//         // }
-
-//         // const course = isAccessAble.rows[0];
-//         // const unitsRes= await pool.query(`SELECT * FROM units WHERE course_id = $1 ORDER BY position ASC`, [courseId]);
-//         // const units = unitsRes.rows;
-
-//         // // getting subtopic for each unit
-//         // for(let unit of units){
-//         //     const subtopicsRes = await pool.query(`SELECT * FROM subtopics WHERE unit_id = $1 ORDER BY position ASC`, [unit.id]);
-//         //     unit.subtopics = subtopicsRes.rows;
-//         // }
-
-//         // res.status(200).json({ course, units });
-
-//         // new code with optimization solved n + 1 query problem and add that is_public filter 
-//         const isAccessAble = await pool.query(`SELECT * FROM courses WHERE id = $1 AND (created_by = $2 OR EXISTS (SELECT 1 FROM user_courses WHERE course_id = $1 AND user_id = $2))`, [courseId, userId]);
-
-//         if (isAccessAble.rowCount === 0) {
-//             return res.status(403).json({error: "Access Denied to this course"});
-//         }
-
-//         const course = isAccessAble.rows[0];
-
-//         const unitsRes = await pool.query(`SELECT * FROM units WHERE course_id = $1 ORDER BY position ASC`, [courseId]);
-//         const units = unitsRes.rows;
-
-//         const unitIds = units.map(u => u.id);
-//         const subtopicsRes = await pool.query(`SELECT * FROM subtopics WHERE unit_id = ANY($1::uuid[]) ORDER BY position ASC`, [unitIds]);
-
-//         const subtopicsMap = {};
-//         for (const subtopic of subtopicsRes.rows) {
-//             if (!subtopicsMap[subtopic.unit_id]){
-//                 subtopicsMap[subtopic.unit_id] = [];
-//             }
-//             subtopicsMap[subtopic.unit_id].push(subtopic);
-//         }
-
-//         for (const unit of units) {
-//             unit.subtopics = subtopicsMap[unit.id] || [];
-//         }
-
-//         return res.status(200).json({course, units})
-
-//     } catch (err) {
-//         console.error("getCourseContentById error:", err);
-//         res.status(500).json({ error: "Failed to fetch course content" });
-//     }
-// }
-
-export const getCourseContentById = async(req,res) => {
-    const courseId = req.params.id;
-    const userId = req.user?.id;
-
-    if(!userId){
-        return res.status(401).json({error: "Unauthorized"});
-    }
-
-    try {
-        const isAccessAble = await pool.query(`SELECT * FROM courses WHERE id = $1 AND (created_by = $2 OR EXISTS (SELECT 1 FROM user_courses WHERE course_id = $1 AND user_id = $2))`, [courseId, userId]);
-
-        if (isAccessAble.rowCount === 0) {
-            return res.status(403).json({error: "Access Denied to this course"});
-        }
-
-        const course = isAccessAble.rows[0];
-
-        const unitsRes = await pool.query(`SELECT * FROM units WHERE course_id = $1 ORDER BY position ASC`, [courseId]);
-        const units = unitsRes.rows;
-
-        const unitIds = units.map(u => u.id);
-        
-        // Get subtopics
-        const subtopicsRes = await pool.query(`SELECT * FROM subtopics WHERE unit_id = ANY($1::uuid[]) ORDER BY position ASC`, [unitIds]);
-        const subtopics = subtopicsRes.rows;
-
-        // Get videos for all subtopics
-        const subtopicIds = subtopics.map(s => s.id);
-        const videosRes = await pool.query(`SELECT * FROM videos WHERE subtopic_id = ANY($1::uuid[]) ORDER BY subtopic_id, id`, [subtopicIds]);
-        const videos = videosRes.rows;
-
-        // Create maps for organization
-        const subtopicsMap = {};
-        const videosMap = {};
-
-        // Organize videos by subtopic_id
-        for (const video of videos) {
-            if (!videosMap[video.subtopic_id]) {
-                videosMap[video.subtopic_id] = [];
-            }
-            videosMap[video.subtopic_id].push(video);
-        }
-
-        // Organize subtopics by unit_id and attach videos
-        for (const subtopic of subtopics) {
-            subtopic.videos = videosMap[subtopic.id] || [];
-            if (!subtopicsMap[subtopic.unit_id]) {
-                subtopicsMap[subtopic.unit_id] = [];
-            }
-            subtopicsMap[subtopic.unit_id].push(subtopic);
-        }
-
-        // Attach subtopics to units
-        for (const unit of units) {
-            unit.subtopics = subtopicsMap[unit.id] || [];
-        }
-
-        return res.status(200).json({course, units})
-
-    } catch (err) {
-        console.error("getCourseContentById error:", err);
-        res.status(500).json({ error: "Failed to fetch course content" });
-    }
-}
-
-
-// Add to controller/course.js
-const generateFullCourseWithCerebras = async (req, res) => {
-  const courseId = req.params.id;
+// ============================================================
+//  POST /api/courses/:id/enroll
+// ============================================================
+export const enrollInCourse = async (req, res) => {
   const userId = req.user?.id;
-  const model = req.query.model;
+  const courseId = req.params.id;
 
   if (!userId) return res.status(401).json({ error: "Unauthorized" });
 
-  const client = await pool.connect();
   try {
-    await client.query('BEGIN');
+    const courseDoc = await coursesRef.doc(courseId).get();
 
-    // Verify ownership
-    const courseRes = await client.query(
-      "SELECT title, difficulty, include_videos FROM courses WHERE id = $1 AND created_by = $2",
-      [courseId, userId]
-    );
-    if (courseRes.rowCount === 0) {
-      await client.query('ROLLBACK');
-      return res.status(404).json({ error: "Course not found or not owned" });
+    if (!courseDoc.exists) {
+      return res.status(404).json({ error: "Course doesn't exist" });
     }
-    const course = courseRes.rows[0];
-
-    // Get all subtopics without content
-    const subtopicsRes = await client.query(`
-      SELECT s.id, s.title, u.title AS unit_title
-      FROM subtopics s
-      JOIN units u ON s.unit_id = u.id
-      WHERE u.course_id = $1 AND s.content IS NULL
-      ORDER BY u.position, s.position
-    `, [courseId]);
-
-    const subtopics = subtopicsRes.rows;
-    if (subtopics.length === 0) {
-      await client.query('COMMIT');
-      return res.status(200).json({ message: "All content already generated" });
+    if (!courseDoc.data().is_public) {
+      return res.status(403).json({ error: "Can't Enroll in this course it's not public" });
     }
 
-    // Group by unit
-    const unitsMap = {};
-    subtopics.forEach(s => {
-      if (!unitsMap[s.unit_title]) unitsMap[s.unit_title] = [];
-      unitsMap[s.unit_title].push(s.title);
+    // Check if already enrolled (composite doc ID)
+    const enrollmentId = `${userId}_${courseId}`;
+    const enrollDoc = await db.collection("user_courses").doc(enrollmentId).get();
+
+    if (enrollDoc.exists) {
+      return res.status(409).json({ error: "Already Enrolled" });
+    }
+
+    // Enroll
+    await db.collection("user_courses").doc(enrollmentId).set({
+      user_id: userId,
+      course_id: courseId,
+      joined_at: new Date(),
     });
 
-    const input = {
-      course_title: course.title,
-      difficulty: course.difficulty,
-      units: Object.entries(unitsMap).map(([unit_title, subtopics]) => ({
-        unit_title,
-        subtopics
-      })),
-      want_youtube_keywords: course.include_videos
+    // Update course_public_stats
+    const statsRef = db.collection("course_public_stats").doc(courseId);
+    await statsRef.set(
+      {
+        course_id: courseId,
+        total_users_joined: FieldValue.increment(1),
+        last_updated: new Date(),
+      },
+      { merge: true }
+    );
+
+    return res.status(200).json({ message: "Enrolled Successfully" });
+  } catch (err) {
+    console.error("enrollInCourse error:", err);
+    return res.status(500).json({ error: "Failed to enroll" });
+  }
+};
+
+// ============================================================
+//  GET /api/courses/me/enrolled
+// ============================================================
+export const getCoursesEnrolledByMe = async (req, res) => {
+  try {
+    const userId = req.user?.id;
+    if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+    // Get all enrollments for this user
+    const enrollSnap = await db
+      .collection("user_courses")
+      .where("user_id", "==", userId)
+      .orderBy("joined_at", "desc")
+      .get();
+
+    const enrolledCourses = [];
+
+    for (const enrollDoc of enrollSnap.docs) {
+      const { course_id, joined_at } = enrollDoc.data();
+
+      const courseDoc = await coursesRef.doc(course_id).get();
+      if (!courseDoc.exists) continue;
+
+      const course = courseDoc.data();
+
+      // Skip courses created by this user (same behavior as PostgreSQL version)
+      if (course.created_by === userId) continue;
+
+      // Get creator name
+      let creator_name = "Unknown";
+      if (course.created_by) {
+        const userDoc = await db.collection("users").doc(course.created_by).get();
+        if (userDoc.exists) creator_name = userDoc.data().username;
+      }
+
+      // Get stats
+      let total_users_joined = 0;
+      const statsDoc = await db.collection("course_public_stats").doc(course_id).get();
+      if (statsDoc.exists) total_users_joined = statsDoc.data().total_users_joined || 0;
+
+      enrolledCourses.push({
+        id: course_id,
+        title: course.title,
+        description: course.description,
+        difficulty: course.difficulty,
+        include_videos: course.include_videos,
+        status: course.status,
+        created_by: course.created_by,
+        outline_json: course.outline_json,
+        creator_name,
+        total_users_joined,
+        joined_at,
+      });
+    }
+
+    return res.status(200).json({ enrolledCourses });
+  } catch (err) {
+    console.error("getEnrolledCourses error:", err);
+    return res.status(500).json({ error: "Failed to fetch enrolled courses" });
+  }
+};
+
+// ============================================================
+//  GET /api/courses/:id/getoutline
+// ============================================================
+export const getCourseOutline = async (req, res) => {
+  const courseId = req.params.id;
+  try {
+    const courseDoc = await coursesRef.doc(courseId).get();
+
+    if (!courseDoc.exists || !courseDoc.data().is_public) {
+      return res.status(404).json({ error: "Course not found or not public" });
+    }
+
+    return res.status(200).json({ outline: courseDoc.data().outline_json });
+  } catch (err) {
+    console.error("getCourseOutlineOnly error:", err);
+    return res.status(500).json({ error: "Failed to fetch course outline" });
+  }
+};
+
+// ============================================================
+//  DELETE /api/courses/:id
+// ============================================================
+export const deleteCourseById = async (req, res) => {
+  const userId = req.user?.id;
+  const courseId = req.params.id;
+
+  if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+  try {
+    const courseDoc = await coursesRef.doc(courseId).get();
+
+    if (!courseDoc.exists) return res.status(404).json({ error: "Course Not Found" });
+
+    if (courseDoc.data().created_by !== userId) {
+      return res.status(403).json({
+        error: "You're not allowed to delete this course, you're not the owner of the course",
+      });
+    }
+
+    // Delete subcollections (units → subtopics → videos)
+    const unitsSnap = await coursesRef.doc(courseId).collection("units").get();
+    for (const unitDoc of unitsSnap.docs) {
+      const subsSnap = await unitDoc.ref.collection("subtopics").get();
+      for (const subDoc of subsSnap.docs) {
+        const videosSnap = await subDoc.ref.collection("videos").get();
+        const vBatch = db.batch();
+        videosSnap.docs.forEach((v) => vBatch.delete(v.ref));
+        if (!videosSnap.empty) await vBatch.commit();
+
+        await subDoc.ref.delete();
+      }
+      await unitDoc.ref.delete();
+    }
+
+    // Delete related top-level docs
+    const enrollSnap = await db.collection("user_courses").where("course_id", "==", courseId).get();
+    if (!enrollSnap.empty) {
+      const eBatch = db.batch();
+      enrollSnap.docs.forEach((d) => eBatch.delete(d.ref));
+      await eBatch.commit();
+    }
+
+    const progressSnap = await db.collection("user_progress").where("course_id", "==", courseId).get();
+    if (!progressSnap.empty) {
+      const pBatch = db.batch();
+      progressSnap.docs.forEach((d) => pBatch.delete(d.ref));
+      await pBatch.commit();
+    }
+
+    await db.collection("course_public_stats").doc(courseId).delete().catch(() => { });
+    await db.collection("course_generation_status").doc(courseId).delete().catch(() => { });
+
+    // Delete course doc
+    await coursesRef.doc(courseId).delete();
+
+    return res.status(200).json({ message: "Course Deleted Successfully" });
+  } catch (err) {
+    console.error("deleteCourseById error:", err);
+    return res.status(500).json({ error: "Failed to delete course" });
+  }
+};
+
+// ============================================================
+//  GET /api/courses/:id/full
+// ============================================================
+export const getCourseContentById = async (req, res) => {
+  const courseId = req.params.id;
+  const userId = req.user?.id;
+
+  if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+  try {
+    const courseDoc = await coursesRef.doc(courseId).get();
+    if (!courseDoc.exists) {
+      return res.status(404).json({ error: "Course not found" });
+    }
+
+    const course = { id: courseId, ...courseDoc.data() };
+
+    // Check access: creator OR enrolled
+    const isCreator = course.created_by === userId;
+    if (!isCreator) {
+      const enrollId = `${userId}_${courseId}`;
+      const enrollDoc = await db.collection("user_courses").doc(enrollId).get();
+      if (!enrollDoc.exists) {
+        return res.status(403).json({ error: "Access Denied to this course" });
+      }
+    }
+
+    // Fetch units (ordered by position)
+    const unitsSnap = await coursesRef.doc(courseId).collection("units").orderBy("position").get();
+    const units = [];
+
+    for (const unitDoc of unitsSnap.docs) {
+      const unit = { id: unitDoc.id, course_id: courseId, ...unitDoc.data() };
+
+      // Fetch subtopics
+      const subsSnap = await unitDoc.ref.collection("subtopics").orderBy("position").get();
+      unit.subtopics = [];
+
+      for (const subDoc of subsSnap.docs) {
+        const subtopic = { id: subDoc.id, unit_id: unitDoc.id, ...subDoc.data() };
+
+        // Fetch videos
+        const videosSnap = await subDoc.ref.collection("videos").get();
+        subtopic.videos = videosSnap.docs.map((v) => ({ id: v.id, subtopic_id: subDoc.id, ...v.data() }));
+
+        unit.subtopics.push(subtopic);
+      }
+
+      units.push(unit);
+    }
+
+    return res.status(200).json({ course, units });
+  } catch (err) {
+    console.error("getCourseContentById error:", err);
+    res.status(500).json({ error: "Failed to fetch course content" });
+  }
+};
+
+// ============================================================
+//  POST /api/courses/:id/generate-content
+// ============================================================
+export const generateCourseContent = async (req, res) => {
+  const providerName = req.body.provider || "Groq";
+  const isCerebras = providerName.toLowerCase() === "cerebras";
+
+  if (isCerebras) {
+    return generateFullCourseWithCerebras(req, res);
+  } else {
+    return generateWithBatching(req, res);
+  }
+};
+
+// ============================================================
+//  Generate content with batching (Groq/Gemini)
+// ============================================================
+export const generateWithBatching = async (req, res) => {
+  const courseId = req.params.id;
+  const userId = req.user?.id;
+  const providerName = req.body.provider || req.query.provider || "Groq";
+  const model = req.body.model || req.query.model || undefined;
+
+  const llm = getLLMProvider(providerName, model);
+
+  if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+  try {
+    const courseDoc = await coursesRef.doc(courseId).get();
+    if (!courseDoc.exists) return res.status(404).json({ error: "Course not found" });
+
+    const course = courseDoc.data();
+    if (course.created_by !== userId) return res.status(403).json({ error: "Forbidden" });
+
+    // Auto-enroll
+    const enrollmentId = `${userId}_${courseId}`;
+    const enrollDoc = await db.collection("user_courses").doc(enrollmentId).get();
+    if (!enrollDoc.exists) {
+      await db.collection("user_courses").doc(enrollmentId).set({
+        user_id: userId,
+        course_id: courseId,
+        joined_at: new Date(),
+      });
+
+      if (course.is_public) {
+        await db.collection("course_public_stats").doc(courseId).set(
+          {
+            course_id: courseId,
+            total_users_joined: FieldValue.increment(1),
+            last_updated: new Date(),
+          },
+          { merge: true }
+        );
+      }
+    }
+
+    // Get first 1 unit (matches original behavior)
+    const unitSnap = await coursesRef
+      .doc(courseId)
+      .collection("units")
+      .orderBy("position")
+      .limit(1)
+      .get();
+
+    const units = unitSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
+    if (!units.length) return res.status(400).json({ error: "No units to generate." });
+
+    let totalSubtopicsProcessed = 0;
+
+    const chunkArray = (arr, size) => {
+      const chunks = [];
+      for (let i = 0; i < arr.length; i += size) {
+        chunks.push(arr.slice(i, i + size));
+      }
+      return chunks;
     };
 
+    for (const unit of units) {
+      const subsSnap = await coursesRef
+        .doc(courseId)
+        .collection("units")
+        .doc(unit.id)
+        .collection("subtopics")
+        .get();
 
-    const llm = getLLMProvider('Cerebras', model);
-    // const llm = new CerebrasProvider()
-    const result = await llm(SUBTOPIC_BATCH_PROMPT, input); // Reuse prompt!
+      const allSubtopics = subsSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      const missingSubtopics = allSubtopics.filter((s) => !s.content);
+      if (missingSubtopics.length === 0) continue;
 
-    // Validate
-    const parsed = SubtopicBatchResponseSchema.safeParse(JSON.stringify(result));
-    if (!parsed.success) {
-      await client.query('ROLLBACK');
-      return res.status(500).json({ error: "Invalid LLM response" });
-    }
-    // console.log(parsed);
-    
+      let batches;
+      if (missingSubtopics.length <= 4) {
+        batches = [missingSubtopics];
+      } else {
+        batches = chunkArray(missingSubtopics, 3);
+      }
 
-    // Save all content + videos
-    for (const content of parsed.data) {
-      const subtopic = subtopics.find(s => 
-        s.title.toLowerCase().trim() === content.subtopic_title.toLowerCase().trim()
-      );
-      if (!subtopic) continue;
+      for (const batch of batches) {
+        const batchInput = {
+          course_title: course.title,
+          unit_title: unit.title,
+          subtopics: batch.map((s) => s.title),
+          difficulty: course.difficulty || "Beginner",
+          want_youtube_keywords: course.include_videos || false,
+        };
 
-      await client.query(
-        `UPDATE subtopics SET content = $1, content_generated_at = NOW() WHERE id = $2`,
-        [JSON.stringify(content), subtopic.id]
-      );
+        const batchRes = await llm(SUBTOPIC_BATCH_PROMPT, batchInput);
+        if (!batchRes || !Array.isArray(batchRes)) {
+          console.warn(`Invalid batch response for unit: ${unit.title}`);
+          continue;
+        }
 
-      if (course.include_videos && content.youtube_keywords?.length) {
-        const videos = await fetchYoutubeVideos(content.youtube_keywords);
-        for (const video of videos) {
-          await client.query(
-            `INSERT INTO videos (subtopic_id, title, youtube_url, thumbnail, duration_sec)
-            VALUES ($1, $2, $3, $4, $5)
-            ON CONFLICT (subtopic_id, youtube_url) DO NOTHING`,
-            [subtopic.id, video.title, video.youtube_url, video.thumbnail, video.duration_sec]
-            );
+        const parsed = SubtopicBatchResponseSchema.safeParse(batchRes);
+        if (!parsed.success) {
+          console.warn(`Batch Schema validation failed for unit: ${unit.title}`, parsed.error);
+          continue;
+        }
+
+        const normalize = (str) => str?.toLowerCase().replace(/\s+/g, " ").trim() ?? "";
+
+        for (const content of parsed.data) {
+          const match = batch.find((s) => normalize(s.title) === normalize(content.subtopic_title));
+
+          if (!match || !match.id) {
+            console.warn(`Could not match content: ${content.subtopic_title}`);
+            continue;
+          }
+
+          // Save content to Firestore
+          await coursesRef
+            .doc(courseId)
+            .collection("units")
+            .doc(unit.id)
+            .collection("subtopics")
+            .doc(match.id)
+            .update({
+              content: content,
+              content_generated_at: new Date(),
+            });
+
+          totalSubtopicsProcessed++;
+
+          // YouTube videos
+          if (course.include_videos && content.youtube_keywords?.length) {
+            fetchYoutubeVideosInBackground(content.youtube_keywords, courseId, unit.id, match.id);
+          }
         }
       }
     }
 
-    await client.query('COMMIT');
     return res.status(200).json({
-      message: "Course generated instantly!",
-      generated: parsed.data.length
+      message: `Generated content for ${totalSubtopicsProcessed} subtopics`,
+      generated: totalSubtopicsProcessed,
     });
-
   } catch (err) {
-    await client.query('ROLLBACK');
-    console.error(err);
-    return res.status(500).json({ error: "Generation failed" });
-  } finally {
-    client.release();
+    console.error("generateWithBatching error:", err);
+    return res.status(500).json({ error: "Failed to generate content" });
   }
 };
 
-export const generateWithBatching = async(req, res) => {
-     const courseId = req.params.id;
-    const userId = req.user?.id;
-    const providerName = req.query.provider || 'Gemini';
-    const model = req.query.model || undefined;
+// ============================================================
+//  Generate full course with Cerebras (single batch, full course)
+// ============================================================
+export const generateFullCourseWithCerebras = async (req, res) => {
+  const courseId = req.params.id;
+  const userId = req.user?.id;
+  const model = req.body.model || undefined;
 
-    const llm = getLLMProvider(providerName, model);
+  if (!userId) return res.status(401).json({ error: "Unauthorized" });
 
-    if (!userId) return res.status(401).json({ error: "Unauthorized" });
+  try {
+    const courseDoc = await coursesRef.doc(courseId).get();
+    if (!courseDoc.exists) return res.status(404).json({ error: "Course not found" });
 
-    try {
-        const courseRes = await pool.query(
-            "SELECT created_by, title, include_videos, difficulty FROM courses WHERE id = $1",
-            [courseId]
-        );
-        if (courseRes.rowCount === 0)
-            return res.status(404).json({ error: "Course not found" });
+    const course = courseDoc.data();
+    if (course.created_by !== userId) return res.status(403).json({ error: "Forbidden" });
 
-        const course = courseRes.rows[0];
-        if (course.created_by !== userId)
-            return res.status(403).json({ error: "Forbidden" });
+    const llm = getLLMProvider("Cerebras", model);
 
-        const client = await pool.connect();
+    // Get all units + missing subtopics
+    const unitsSnap = await coursesRef.doc(courseId).collection("units").orderBy("position").get();
 
-        try {
-            await client.query('BEGIN');
+    const unitsData = [];
+    const subtopicMap = new Map(); // subtopic title -> { unitId, subtopicId }
 
-            const enrollmentCheck = await client.query(`SELECT 1 FROM user_courses WHERE user_id = $1 AND course_id = $2`, [userId, courseId]);
-            const isAlreadyEnrolled = enrollmentCheck.rowCount > 0;
+    for (const unitDoc of unitsSnap.docs) {
+      const subsSnap = await unitDoc.ref.collection("subtopics").orderBy("position").get();
+      const subtopics = subsSnap.docs
+        .filter((d) => !d.data().content)
+        .map((d) => {
+          subtopicMap.set(d.data().title.toLowerCase().trim(), {
+            unitId: unitDoc.id,
+            subtopicId: d.id,
+          });
+          return d.data().title;
+        });
 
-            if (!isAlreadyEnrolled) {
-                await client.query(`
-                    INSERT INTO user_courses(user_id, course_id)
-                    VALUES($1, $2)
-                `, [userId, courseId]);
-
-                // updating the total_user_joined for the course only if its public
-                const publicCheck = await client.query('SELECT is_public FROM courses WHERE id = $1', [courseId]);
-                const isPublic = publicCheck.rows[0]?.is_public;
-
-                if (isPublic) {
-                    await client.query(`
-                        INSERT INTO course_public_stats (course_id, total_users_joined)
-                        VALUES ($1, 1)
-                        ON CONFLICT (course_id) DO UPDATE
-                        SET total_users_joined = course_public_stats.total_users_joined + 1, last_updated = NOW()
-                    `, [courseId]);
-                }
-            }
-
-            await client.query('COMMIT');
-        } catch (e) {
-            await client.query('ROLLBACK');
-            console.error("Auto-enrollment transaction failed:", e);
-        } finally {
-            client.release();
-        }
-
-
-
-        const courseTitle = course.title;
-        const courseDifficulty = course.difficulty || "Beginner";
-
-        // Get first 1 units
-        const unitRes = await pool.query(
-            `SELECT id, title FROM units WHERE course_id = $1 ORDER BY position ASC LIMIT 1`, // I changed it to 1, we can change it to LIMIT 2
-            [courseId]
-        );
-        const units = unitRes.rows;
-
-        if (!units.length) return res.status(400).json({ error: "No units to generate." });
-
-
-        let totalSubtopicsProcessed = 0;
-
-        const chunkArray = (arr, size) => {
-            const chunks = [];
-            for (let i = 0; i < arr.length; i+=size) {
-                chunks.push(arr.slice(i, i+size));
-            }
-            return chunks;
-        }
-        for (const unit of units) {
-            // Get subtopics for each unit
-            const subtopicsRes = await pool.query(
-                `SELECT id, title, content FROM subtopics WHERE unit_id = $1`,
-                [unit.id]
-            );
-
-            const missingSubtopics = subtopicsRes.rows.filter(s => !s.content);
-            if(missingSubtopics.length === 0) continue;
-
-            let batches = [];
-            if(missingSubtopics.length <= 4){
-                batches = [missingSubtopics];
-            }else{
-                batches = chunkArray(missingSubtopics, 3);
-            }
-
-            for (const batch of batches) {
-                const batchInput = {
-                    course_title: courseTitle,
-                    unit_title: unit.title,
-                    subtopics: batch.map(s => s.title),
-                    difficulty: courseDifficulty || "Begineer",
-                    want_youtube_keywords: course.include_videos || false
-                }
-
-                const batchRes = await llm(SUBTOPIC_BATCH_PROMPT, batchInput);
-                if (!batchRes || !Array.isArray(batchRes)){
-                    console.warn(`"Invalid batch response for unit: ${unit.title}"`);
-                    continue;
-                }
-
-                const parsed = SubtopicBatchResponseSchema.safeParse(batchRes);
-                if (!parsed.success) {
-                    console.warn(`Batch Schema validation failed for unit: ${unit.title}`, parsed.error);
-                    continue;
-                }
-
-                console.log("Trying to match with subtopics batch:", batch);
-                
-                const normalize = (str) => str?.toLowerCase().replace(/\s+/g, ' ').trim() ?? '';
-                for (const content of parsed.data) {
-                    console.log('Subtopic Title from AI:', content.subtopic_title);
-                    // const matchingSubtopic = batch.find(s =>
-                    //     content.subtopic_title?.toLowerCase().trim() === s.title?.toLowerCase().trim()
-                    // );
-
-                       const matchingSubtopic = batch.find(s =>
-                            normalize(content.subtopic_title) === normalize(s.title)
-                        );
-
-
-                    if (!matchingSubtopic) {
-                        console.warn(`No matching subtopics found in response from Gemini for ${content.subtopic_title}`);
-                        continue;
-                    }
-
-                    await pool.query(`UPDATE subtopics SET content = $1 WHERE id = $2`, [JSON.stringify(content), matchingSubtopic.id]);
-
-                    if (batchInput.want_youtube_keywords && content.youtube_keywords?.length) {
-                        for (const keyword of content.youtube_keywords) {
-                            console.log(`Fetching YouTube video for keyword: ${keyword}`);
-                            const youtubeVideos = await fetchYoutubeVideos([keyword]);
-
-                            // Check if youtubeVideos is an array and has elements
-                            if (Array.isArray(youtubeVideos) && youtubeVideos.length) {
-                                console.log("youtube Videos: ", youtubeVideos);
-                                
-                                // Store each video for the current subtopic
-                                for (const video of youtubeVideos) {
-                                    const { title, youtube_url, thumbnail, duration_sec } = video;
-                                    const duration = duration_sec || null;
-
-                                    // Check if the video already exists in the database
-                                    const existingVideoCheck = await pool.query(`
-                                        SELECT 1 FROM videos WHERE youtube_url = $1 AND subtopic_id = $2
-                                    `, [youtube_url, matchingSubtopic.id]);
-
-                                    if (existingVideoCheck.rowCount === 0) {
-                                        // Insert the video if it doesn't already exist
-                                        await pool.query(`
-                                            INSERT INTO videos (subtopic_id, title, youtube_url, thumbnail, duration_sec)
-                                            VALUES ($1, $2, $3, $4, $5)
-                                        `, [matchingSubtopic.id, title, youtube_url, thumbnail, duration]);
-
-                                        console.log(`Inserted video for subtopic ID: ${matchingSubtopic.id}`);
-                                    } else {
-                                        console.log(`Video with URL ${youtube_url} already exists for subtopic ID: ${matchingSubtopic.id}`);
-                                    }
-                                }
-
-                            } else {
-                                console.warn(`No videos found for keyword: ${keyword}`);
-                            }
-                        }
-                    }
-
-                    totalSubtopicsProcessed++;
-                }
-
-            }}
-
-            const subRes = await pool.query(`
-                SELECT s.id 
-                FROM units u 
-                JOIN subtopics s ON u.id = s.unit_id 
-                WHERE u.course_id = $1 AND s.content IS NULL
-                `, [courseId]
-            );
-
-            const remainingSubtopics = subRes.rows;
-
-            await pool.query(`
-                    INSERT INTO course_generation_status (course_id, status, total_subtopics, generated_subtopics, last_updated)
-                    VALUES($1, 'in_progress', $2, 0, NOW())
-                    ON CONFLICT (course_id) DO UPDATE
-                    SET status = 'in_progress', total_subtopics = $2, last_updated = NOW()                
-                `,[courseId, subRes.rowCount]);
-          
-                /// 
-                startBackgroundGeneration(courseId, userId, providerName);
-
-            return res.status(200).json({
-                message: "First 2 units generated, background generation started for remaining.",
-                units: units.length,
-                remaining_subtopics: remainingSubtopics.length,
-                status: 'in_progress',
-            });
-    } catch (err) {
-        console.error("generateCourseContent error:", err);
-        return res.status(500).json({ error: "Failed to generate course content" });
+      if (subtopics.length > 0) {
+        unitsData.push({ unit_title: unitDoc.data().title, subtopics });
+      }
     }
-}
 
-/*
- POST /api/courses/:id/generate-content
-*/
+    if (unitsData.length === 0) {
+      return res.status(200).json({ message: "All content already generated", generated: 0 });
+    }
 
-export const generateCourseContent = async (req, res) => {
-  const providerName = req.body.provider || 'Groq';
-  const isCerebras = providerName.toLowerCase() === 'cerebras';
+    const input = {
+      course_title: course.title,
+      difficulty: course.difficulty,
+      units: unitsData,
+      want_youtube_keywords: course.include_videos,
+    };
 
-  if (isCerebras) {
-    return generateFullCourseWithCerebras(req, res); // NEW
-  } else {
-    return generateWithBatching(req, res); // OLD
+    const result = await llm(SUBTOPIC_BATCH_PROMPT, input);
+    const parsed = SubtopicBatchResponseSchema.safeParse(result);
+
+    if (!parsed.success) {
+      return res.status(502).json({ error: "Invalid LLM response from Cerebras" });
+    }
+
+    let generated = 0;
+    for (const content of parsed.data) {
+      const key = content.subtopic_title?.toLowerCase().trim();
+      const location = subtopicMap.get(key);
+
+      if (!location) {
+        console.warn(`No matching subtopic for: ${content.subtopic_title}`);
+        continue;
+      }
+
+      await coursesRef
+        .doc(courseId)
+        .collection("units")
+        .doc(location.unitId)
+        .collection("subtopics")
+        .doc(location.subtopicId)
+        .update({ content: content, content_generated_at: new Date() });
+
+      generated++;
+
+      if (course.include_videos && content.youtube_keywords?.length) {
+        fetchYoutubeVideosInBackground(
+          content.youtube_keywords,
+          courseId,
+          location.unitId,
+          location.subtopicId
+        );
+      }
+    }
+
+    return res.status(200).json({ message: `Generated ${generated} subtopics`, generated });
+  } catch (err) {
+    console.error("generateFullCourseWithCerebras error:", err);
+    return res.status(500).json({ error: "Failed to generate with Cerebras" });
   }
 };
 
-// --------------------------------------------------------------------
-
-const chunkArray = (arr, size) => {
+// ============================================================
+//  Helper: chunk array
+// ============================================================
+function chunkArray(arr, size) {
   const chunks = [];
   for (let i = 0; i < arr.length; i += size) {
     chunks.push(arr.slice(i, i + size));
   }
   return chunks;
-};
-
-// export const streamCourseGeneration = async (req, res) => {
-//   const courseId = req.params.id;
-//   const userId = req.user?.id;
-//   // const providerName = (req.body.provider || 'Groq').trim();
-//   // const model = req.body.model;
-
-//   // const isCerebras = providerName.toLowerCase() === 'cerebras';
-
-//   // SSE Headers
-//   res.writeHead(200, {
-//     'Content-Type': 'text/event-stream',
-//     'Cache-Control': 'no-cache',
-//     'Connection': 'keep-alive',
-//     'Access-Control-Allow-Origin': '*',
-//   });
-
-//   const send = (data) => {
-//     res.write(`data: ${JSON.stringify(data)}\n\n`);
-//   };
-
-//   // === MANUAL BODY PARSING ===
-//   let rawBody = '';
-//   req.on('data', chunk => rawBody += chunk.toString());
-//   req.on('end', async () => {
-//     let providerName = 'Groq';
-//     let model = null;
-
-
-//     if (rawBody) {
-//       try {
-//         // Clean whitespace, newlines, trailing commas
-//         const cleaned = rawBody
-//           .replace(/,\s*}/g, '}')     // Remove trailing comma
-//           .replace(/,\s*]/g, ']')     // Remove trailing comma in arrays
-//           .trim();
-
-//         const parsed = JSON.parse(cleaned);
-//         providerName = (parsed.provider || 'Groq').trim();
-//         model = parsed.model || null;
-//       } catch (e) {
-//         console.error("JSON Parse Error:", e.message, "Raw:", rawBody);
-//         send({ type: "error", message: "Invalid request format" });
-//         res.end();
-//         return;
-//       }
-//     }
-    
-//     const isCerebras = providerName.toLowerCase() === 'cerebras';
-
-//   let client;
-//   try {
-//     client = await pool.connect();
-//     await client.query('BEGIN');
-
-//     // 1. Verify ownership + get course
-//     const courseRes = await client.query(
-//       `SELECT title, difficulty, include_videos, is_public FROM courses WHERE id = $1 AND created_by = $2`,
-//       [courseId, userId]
-//     );
-//     if (courseRes.rowCount === 0) {
-//       send({ type: "error", message: "Course not found or not owned" });
-//       res.end();
-//       return;
-//     }
-//     const course = courseRes.rows[0];
-
-//     // 2. Auto-enroll (your exact logic)
-//     const enrollmentCheck = await client.query(
-//       `SELECT 1 FROM user_courses WHERE user_id = $1 AND course_id = $2`,
-//       [userId, courseId]
-//     );
-//     const isAlreadyEnrolled = enrollmentCheck.rowCount > 0;
-
-//     if (!isAlreadyEnrolled) {
-//       await client.query(
-//         `INSERT INTO user_courses(user_id, course_id) VALUES($1, $2)`,
-//         [userId, courseId]
-//       );
-
-//       if (course.is_public) {
-//         await client.query(
-//           `INSERT INTO course_public_stats (course_id, total_users_joined)
-//            VALUES ($1, 1)
-//            ON CONFLICT (course_id) DO UPDATE
-//            SET total_users_joined = course_public_stats.total_users_joined + 1, last_updated = NOW()`,
-//           [courseId]
-//         );
-//       }
-//     }
-
-//     // 3. Get missing subtopics
-//     const subRes = await client.query(`
-//       SELECT s.id, s.title, u.id AS unit_id, u.title AS unit_title
-//       FROM subtopics s
-//       JOIN units u ON s.unit_id = u.id
-//       WHERE u.course_id = $1 AND s.content IS NULL
-//       ORDER BY u.position, s.position
-//     `, [courseId]);
-
-//     const missingSubtopics = subRes.rows;
-//     if (missingSubtopics.length === 0) {
-//       send({ type: "complete", generated: 0, total: 0, message: "All content already generated" });
-//       res.end();
-//       return;
-//     }
-
-//     const total = missingSubtopics.length;
-//     let generated = 0;
-//     send({ type: "start", total, provider: providerName, isCerebras });
-
-//     const llm = getLLMProvider(providerName, model);
-
-//     // 4. Group by unit
-//     const grouped = new Map();
-//     for (const sub of missingSubtopics) {
-//       if (!grouped.has(sub.unit_id)) {
-//         grouped.set(sub.unit_id, { unit_title: sub.unit_title, subtopics: [] });
-//       }
-//       grouped.get(sub.unit_id).subtopics.push(sub);
-//     }
-
-//     // 5. Decide batch size
-//     const batchSize = isCerebras ? total : 3;
-//     const allBatches = [];
-
-//     for (const [, group] of grouped) {
-//       const unitBatches = chunkArray(group.subtopics, batchSize);
-//       allBatches.push(...unitBatches.map(batch => ({ ...group, subtopics: batch })));
-//     }
-
-//     // 6. Process each batch
-//     for (const [batchIdx, group] of allBatches.entries()) {
-//       const batch = group.subtopics;
-//       const batchInput = {
-//         course_title: course.title,
-//         unit_title: group.unit_title,
-//         subtopics: batch.map(s => s.title),
-//         difficulty: course.difficulty || "Beginner",
-//         want_youtube_keywords: course.include_videos
-//       };
-
-//       try {
-//         const batchRes = await llm(SUBTOPIC_BATCH_PROMPT, batchInput);
-//         if (!batchRes || !Array.isArray(batchRes)) {
-//           send({ type: "warning", message: `Invalid response for unit: ${group.unit_title}` });
-//           continue;
-//         }
-
-//         const parsed = SubtopicBatchResponseSchema.safeParse(batchRes);
-//         if (!parsed.success) {
-//           send({ type: "warning", message: `Validation failed for unit: ${group.unit_title}` });
-//           continue;
-//         }
-
-//         const normalize = (str) => str?.toLowerCase().replace(/\s+/g, ' ').trim() || '';
-
-//         for (const content of parsed.data) {
-//           const match = batch.find(s => normalize(s.title) === normalize(content.subtopic_title));
-//           if (!match) {
-//             send({ type: "warning", message: `No match for: ${content.subtopic_title}` });
-//             continue;
-//           }
-
-//           // Save content
-//           await client.query(
-//             `UPDATE subtopics SET content = $1, content_generated_at = NOW() WHERE id = $2`,
-//             [JSON.stringify(content), match.id]
-//           );
-
-//           // YouTube: your exact logic
-//           if (course.include_videos && content.youtube_keywords?.length) {
-//             for (const keyword of content.youtube_keywords) {
-//               const videos = await fetchYoutubeVideos([keyword]);
-//               if (!Array.isArray(videos)) continue;
-
-//               for (const video of videos) {
-//                 const { title, youtube_url, thumbnail, duration_sec } = video;
-//                 const duration = duration_sec || null;
-
-//                 const exists = await client.query(
-//                   `SELECT 1 FROM videos WHERE youtube_url = $1 AND subtopic_id = $2`,
-//                   [youtube_url, match.id]
-//                 );
-
-//                 if (exists.rowCount === 0) {
-//                   await client.query(
-//                     `INSERT INTO videos (subtopic_id, title, youtube_url, thumbnail, duration_sec)
-//                      VALUES ($1, $2, $3, $4, $5)`,
-//                     [match.id, title, youtube_url, thumbnail, duration]
-//                   );
-//                 }
-//               }
-//             }
-//           }
-
-//           generated++;
-//           send({
-//             type: "progress",
-//             subtopic: content.subtopic_title,
-//             unit: group.unit_title,
-//             progress: Math.round((generated / total) * 100),
-//             generated,
-//             total,
-//             batch: batchIdx + 1,
-//             totalBatches: allBatches.length
-//           });
-//         }
-//       } catch (err) {
-//         send({ type: "warning", message: `Batch ${batchIdx + 1} failed` });
-//         console.error("Batch error:", err);
-//       }
-
-//       // Rate limit for non-Cerebras
-//       if (!isCerebras) {
-//         await new Promise(resolve => setTimeout(resolve, 2000));
-//       }
-//     }
-
-//     // 7. Update status
-//     await client.query(
-//       `INSERT INTO course_generation_status (course_id, status, total_subtopics, generated_subtopics, last_updated)
-//        VALUES ($1, 'completed', $2, $3, NOW())
-//        ON CONFLICT (course_id) DO UPDATE
-//        SET status = 'completed', generated_subtopics = $3, last_updated = NOW()`,
-//       [courseId, total, generated]
-//     );
-
-//     await client.query('COMMIT');
-//     send({ type: "complete", generated, total });
-
-//   } catch (err) {
-//     if (client) await client.query('ROLLBACK');
-//     send({ type: "error", message: err.message || "Generation failed" });
-//     console.error("Streaming generation failed:", err);
-//   } finally {
-//     if (client) client.release();
-//     res.end();
-//   }
-// });
-// };
-
-// export const streamCourseGeneration = async (req, res) => {
-//   const courseId = req.params.id;
-//   const userId = req.user?.id;
-
-//   // SSE Headers
-//   res.writeHead(200, {
-//     'Content-Type': 'text/event-stream',
-//     'Cache-Control': 'no-cache, no-transform',
-//     'Connection': 'keep-alive',
-//     'Access-Control-Allow-Origin': '*',
-//     'X-Accel-Buffering': 'no'
-//   });
-
-//   res.flushHeaders();
-
-//   const send = (data) => {
-//     res.write(`data: ${JSON.stringify(data)}\n\n`);
-//     if (typeof res.flush === 'function') {
-//       res.flush();
-//     }
-//   };
-
-//   let rawBody = '';
-//   req.on('data', chunk => rawBody += chunk.toString());
-//   req.on('end', async () => {
-//     let providerName = 'Groq';
-//     let model = null;
-
-//     if (rawBody) {
-//       try {
-//         const cleaned = rawBody.replace(/,\s*}/g, '}').replace(/,\s*]/g, ']').trim();
-//         const parsed = JSON.parse(cleaned);
-//         providerName = (parsed.provider || 'Groq').trim();
-//         model = parsed.model || null;
-//       } catch (e) {
-//         console.error("JSON Parse Error:", e.message);
-//         send({ type: "error", message: "Invalid request format" });
-//         res.end();
-//         return;
-//       }
-//     }
-
-//     const isCerebras = providerName.toLowerCase() === 'cerebras';
-//     let client;
-
-//     try {
-//       client = await pool.connect();
-//       await client.query('BEGIN');
-
-//       // 1. Verify ownership
-//       const courseRes = await client.query(
-//         `SELECT title, difficulty, include_videos, is_public FROM courses WHERE id = $1 AND created_by = $2`,
-//         [courseId, userId]
-//       );
-//       if (courseRes.rowCount === 0) {
-//         send({ type: "error", message: "Course not found or not owned" });
-//         res.end();
-//         return;
-//       }
-//       const course = courseRes.rows[0];
-
-//       // 2. Auto-enroll
-//       const enrollmentCheck = await client.query(
-//         `SELECT 1 FROM user_courses WHERE user_id = $1 AND course_id = $2`,
-//         [userId, courseId]
-//       );
-//       if (enrollmentCheck.rowCount === 0) {
-//         await client.query(`INSERT INTO user_courses(user_id, course_id) VALUES($1, $2)`, [userId, courseId]);
-//         if (course.is_public) {
-//           await client.query(
-//             `INSERT INTO course_public_stats (course_id, total_users_joined)
-//              VALUES ($1, 1) ON CONFLICT (course_id) DO UPDATE
-//              SET total_users_joined = course_public_stats.total_users_joined + 1, last_updated = NOW()`,
-//             [courseId]
-//           );
-//         }
-//       }
-
-//       // 3. Get missing subtopics with unit information
-//       const subRes = await client.query(`
-//         SELECT s.id, s.title, u.id AS unit_id, u.title AS unit_title, u.position AS unit_position
-//         FROM subtopics s
-//         JOIN units u ON s.unit_id = u.id
-//         WHERE u.course_id = $1 AND s.content IS NULL
-//         ORDER BY u.position, s.position
-//       `, [courseId]);
-
-//       const missingSubtopics = subRes.rows;
-//       if (missingSubtopics.length === 0) {
-//         send({ type: "complete", generated: 0, total: 0, message: "All content already generated" });
-//         res.end();
-//         return;
-//       }
-
-//       const total = missingSubtopics.length;
-//       let generated = 0;
-//       send({ type: "start", total, provider: providerName, isCerebras });
-
-//       const llmProvider = getLLMProvider(providerName);
-
-//       // FIXED: Different logic for Cerebras vs Streaming providers
-//       if (isCerebras) {
-//         // Use Cerebras' capability to process ALL units and subtopics at once
-//         console.log("Using Cerebras to process all subtopics at once");
-        
-//         // Group by unit with proper structure
-//         const unitsMap = new Map();
-//         missingSubtopics.forEach(s => {
-//           if (!unitsMap.has(s.unit_id)) {
-//             unitsMap.set(s.unit_id, {
-//               unit_title: s.unit_title,
-//               unit_position: s.unit_position,
-//               subtopics: []
-//             });
-//           }
-//           unitsMap.get(s.unit_id).subtopics.push({
-//             id: s.id,
-//             title: s.title
-//           });
-//         });
-
-//         const input = {
-//           course_title: course.title,
-//           difficulty: course.difficulty,
-//           units: Array.from(unitsMap.values()).sort((a, b) => a.unit_position - b.unit_position).map(unit => ({
-//             unit_title: unit.unit_title,
-//             subtopics: unit.subtopics.map(s => s.title)
-//           })),
-//           want_youtube_keywords: course.include_videos
-//         };
-
-//         console.log(`Cerebras processing ${missingSubtopics.length} subtopics across ${unitsMap.size} units`);
-
-//         // Send initial progress
-//         send({ 
-//           type: "progress", 
-//           subtopic: "Starting batch generation...", 
-//           unit: "All units",
-//           progress: 0,
-//           generated: 0,
-//           total 
-//         });
-//         const llm = new CerebrasProvider();
-
-//         const result = await llm.generateContent(SUBTOPIC_BATCH_PROMPT, input);
-//         console.log("Cerebras parsed response received, type:", typeof result, "length:", Array.isArray(result) ? result.length : 'N/A');         
-//         console.log("Cerebras parsed response received: ", result);         
-       
-//         // Send the complete result as one chunk for preview
-//         send({ type: "chunk", subtopic: "Complete batch content", chunk: JSON.stringify(result,null,3) });
-
-//         const parsed = SubtopicBatchResponseSchema.safeParse(result);
-//         if (!parsed.success) {
-//           send({ type: "error", message: "Invalid LLM response from Cerebras" });
-//           await client.query('ROLLBACK');
-//           res.end();
-//           return;
-//         }
-
-//         // Save all content and update progress
-//         for (const content of parsed.data) {
-//           // Find matching subtopic across all units
-//           const subtopic = missingSubtopics.find(s => 
-//             s.title.toLowerCase().trim() === content.subtopic_title.toLowerCase().trim()
-//           );
-          
-//           if (!subtopic) {
-//             console.warn(`No matching subtopic found for: ${content.subtopic_title}`);
-//             continue;
-//           }
-
-//           await client.query(
-//             `UPDATE subtopics SET content = $1, content_generated_at = NOW() WHERE id = $2`,
-//             [JSON.stringify(content), subtopic.id]
-//           );
-
-//           generated++;
-          
-//           // Send progress for each subtopic
-//           send({
-//             type: "progress",
-//             subtopic: subtopic.title,
-//             unit: subtopic.unit_title,
-//             progress: Math.round((generated / total) * 100),
-//             generated,
-//             total
-//           });
-
-//           // YouTube videos in background
-//           if (course.include_videos && content.youtube_keywords?.length) {
-//             (async () => {
-//               try {
-//                 const videos = await fetchYoutubeVideos(content.youtube_keywords);
-//                 for (const video of videos) {
-//                   await client.query(
-//                     `INSERT INTO videos (subtopic_id, title, youtube_url, thumbnail, duration_sec)
-//                      VALUES ($1, $2, $3, $4, $5) ON CONFLICT (subtopic_id, youtube_url) DO NOTHING`,
-//                     [subtopic.id, video.title, video.youtube_url, video.thumbnail, video.duration_sec]
-//                   );
-//                 }
-//               } catch (e) {
-//                 console.error(`YouTube failed for ${subtopic.title}:`, e);
-//               }
-//             })();
-//           }
-//         }
-//       } else {
-//         // For streaming providers, batch by unit to maintain proper grouping
-//         const batchesByUnit = new Map();
-        
-//         // Group subtopics by unit
-//         missingSubtopics.forEach(subtopic => {
-//           if (!batchesByUnit.has(subtopic.unit_id)) {
-//             batchesByUnit.set(subtopic.unit_id, {
-//               unit_title: subtopic.unit_title,
-//               subtopics: []
-//             });
-//           }
-//           batchesByUnit.get(subtopic.unit_id).subtopics.push(subtopic);
-//         });
-
-//         console.log(`Processing ${missingSubtopics.length} subtopics across ${batchesByUnit.size} units`);
-
-//         // Process each unit's subtopics in batches of 3-4
-//         for (const [unitId, unitData] of batchesByUnit) {
-//           const unitSubtopics = unitData.subtopics;
-//           const batchSize = 3; // Process 3 subtopics at a time per unit
-          
-//           for (let i = 0; i < unitSubtopics.length; i += batchSize) {
-//             const batch = unitSubtopics.slice(i, i + batchSize);
-//             const batchInput = {
-//               course_title: course.title,
-//               unit_title: unitData.unit_title,
-//               subtopics: batch.map(s => s.title),
-//               difficulty: course.difficulty || "Beginner",
-//               want_youtube_keywords: course.include_videos
-//             };
-
-//             let fullResponse = "";
-
-//             try {
-//               await llmProvider.streamContent(
-//                 SUBTOPIC_BATCH_PROMPT,
-//                 batchInput,
-//                 (chunk) => {
-//                   fullResponse += chunk;
-//                   send({ 
-//                     type: "chunk", 
-//                     subtopic: `Batch: ${batch.map(s => s.title).join(', ')}`, 
-//                     chunk,
-//                     unit: unitData.unit_title
-//                   });
-//                   if (res.flush) res.flush();
-//                 },
-//                 (err) => send({ type: "warning", message: `Stream error: ${err.message}` })
-//               );
-
-              
-
-//               // Parse and save batch results
-              
-//               const parsed = SubtopicBatchResponseSchema.safeParse(JSON.parse(fullResponse));
-//               if (!parsed.success) {
-//                 send({ type: "warning", message: `Invalid JSON for batch in unit: ${unitData.unit_title}` });
-//                 continue;
-//               }
-
-// //               const parsedData = safeJsonParse(fullResponse);
-
-// // if (!parsedData) {
-// //   send({ type: "warning", message: `Invalid JSON structure for unit: ${unitData.unit_title}` });
-// //   continue;
-// // }
-
-// // const parsed = SubtopicBatchResponseSchema.safeParse(parsedData);
-// // if (!parsed.success) {
-// //   send({ type: "warning", message: `Schema validation failed for unit: ${unitData.unit_title}` });
-// //   continue;
-// // }
-
-
-//               // Process each subtopic in the batch
-//               for (const content of parsed.data) {
-//                 const subtopic = batch.find(s => 
-//                   s.title.toLowerCase().trim() === content.subtopic_title.toLowerCase().trim()
-//                 );
-//                 if (!subtopic) {
-//                   console.warn(`No matching subtopic in batch for: ${content.subtopic_title}`);
-//                   continue;
-//                 }
-
-//                 await client.query(
-//                   `UPDATE subtopics SET content = $1, content_generated_at = NOW() WHERE id = $2`,
-//                   [JSON.stringify(content), subtopic.id]
-//                 );
-
-//                 generated++;
-//                 send({
-//                   type: "progress",
-//                   subtopic: subtopic.title,
-//                   unit: subtopic.unit_title,
-//                   progress: Math.round((generated / total) * 100),
-//                   generated,
-//                   total
-//                 });
-
-//                 // YouTube in background
-//                 if (course.include_videos && content.youtube_keywords?.length) {
-//                   (async () => {
-//                     try {
-//                       const videos = await fetchYoutubeVideos(content.youtube_keywords);
-//                       for (const video of videos) {
-//                         await client.query(
-//                           `INSERT INTO videos (subtopic_id, title, youtube_url, thumbnail, duration_sec)
-//                            VALUES ($1, $2, $3, $4, $5) ON CONFLICT (subtopic_id, youtube_url) DO NOTHING`,
-//                           [subtopic.id, video.title, video.youtube_url, video.thumbnail, video.duration_sec]
-//                         );
-//                       }
-//                     } catch (e) {
-//                       console.error(`YouTube failed for ${subtopic.title}:`, e);
-//                     }
-//                   })();
-//                 }
-//               }
-
-//               // Rate limit between batches
-//               await new Promise(r => setTimeout(r, 1000));
-              
-//             } catch (err) {
-//               send({ type: "warning", message: `Failed batch in unit: ${unitData.unit_title}` });
-//               console.error("Batch error:", err);
-//             }
-//           }
-//         }
-//       }
-
-//       // Final status
-//       await client.query(
-//         `INSERT INTO course_generation_status (course_id, status, total_subtopics, generated_subtopics, last_updated)
-//          VALUES ($1, 'completed', $2, $3, NOW())
-//          ON CONFLICT (course_id) DO UPDATE
-//          SET status = 'completed', generated_subtopics = $3, last_updated = NOW()`,
-//         [courseId, total, generated]
-//       );
-
-//       await client.query('COMMIT');
-//       send({ type: "complete", generated, total });
-
-//     } catch (err) {
-//       if (client) await client.query('ROLLBACK');
-//       send({ type: "error", message: err.message || "Generation failed" });
-//       console.error("Streaming generation failed:", err);
-//     } finally {
-//       if (client) client.release();
-//       res.end();
-//     }
-//   });
-// };
-function safeJsonParse(text) {
-  if (!text) return null;
-
-  let json = text.trim();
-
-  // Remove Markdown fences or stray text
-  json = json.replace(/```json|```/g, '').trim();
-
-  // Find only the actual JSON segment
-  const start = json.indexOf('[');
-  const end = json.lastIndexOf(']');
-  if (start !== -1 && end !== -1 && end > start) {
-    json = json.slice(start, end + 1);
-  }
-
-  // Clean double closing brackets like "]]"
-  json = json.replace(/\]\s*\]+$/g, ']');
-
-  // Attempt to parse
-  try {
-    return JSON.parse(json);
-  } catch (err) {
-    console.warn("⚠️ safeJsonParse failed:", err.message);
-    console.warn("➡️ Raw text ends with:", json.slice(-50));
-    return null;
-  }
 }
 
-//-----------------------------------110% WORKING-----------------------
-
-// export const streamCourseGeneration = async (req, res) => {
-//   const courseId = req.params.id;
-//   const userId = req.user?.id;
-
-//   // SSE Headers
-//   // res.writeHead(200, {
-//   //   'Content-Type': 'text/event-stream',
-//   //   'Cache-Control': 'no-cache',
-//   //   'Connection': 'keep-alive',
-//   //   'Access-Control-Allow-Origin': '*',
-//   // });
-
-//   // const send = (data) => {
-//   //   res.write(`data: ${JSON.stringify(data)}\n\n`);
-//   // };
-//     res.writeHead(200, {
-//     'Content-Type': 'text/event-stream',
-//     'Cache-Control': 'no-cache, no-transform', // Added no-transform
-//     'Connection': 'keep-alive',
-//     'Access-Control-Allow-Origin': '*',
-//     'X-Accel-Buffering': 'no' // Disable proxy buffering
-//   });
-
-//   // FIXED: Disable compression and buffering
-//   res.flushHeaders(); // This forces headers to be sent immediately
-
-//   const send = (data) => {
-//     res.write(`data: ${JSON.stringify(data)}\n\n`);
-//     // FIXED: Force flush if available
-//     if (typeof res.flush === 'function') {
-//       res.flush();
-//     }
-//   };
-
-//   // === MANUAL BODY PARSING ===
-//   let rawBody = '';
-//   req.on('data', chunk => rawBody += chunk.toString());
-//   req.on('end', async () => {
-//     let providerName = 'Groq';
-//     let model = null;
-
-//     if (rawBody) {
-//       try {
-//         const cleaned = rawBody
-//           .replace(/,\s*}/g, '}')
-//           .replace(/,\s*]/g, ']')
-//           .trim();
-
-//         const parsed = JSON.parse(cleaned);
-//         providerName = (parsed.provider || 'Groq').trim();
-//         model = parsed.model || null;
-//       } catch (e) {
-//         console.error("JSON Parse Error:", e.message, "Raw:", rawBody);
-//         send({ type: "error", message: "Invalid request format" });
-//         res.end();
-//         return;
-//       }
-//     }
-
-//     const isCerebras = providerName.toLowerCase() === 'cerebras';
-
-//     let client;
-//     try {
-//       client = await pool.connect();
-//       await client.query('BEGIN');
-
-//       // 1. Verify ownership
-//       const courseRes = await client.query(
-//         `SELECT title, difficulty, include_videos, is_public FROM courses WHERE id = $1 AND created_by = $2`,
-//         [courseId, userId]
-//       );
-//       if (courseRes.rowCount === 0) {
-//         send({ type: "error", message: "Course not found or not owned" });
-//         res.end();
-//         return;
-//       }
-//       const course = courseRes.rows[0];
-
-//       // 2. Auto-enroll
-//       const enrollmentCheck = await client.query(
-//         `SELECT 1 FROM user_courses WHERE user_id = $1 AND course_id = $2`,
-//         [userId, courseId]
-//       );
-//       if (enrollmentCheck.rowCount === 0) {
-//         await client.query(
-//           `INSERT INTO user_courses(user_id, course_id) VALUES($1, $2)`,
-//           [userId, courseId]
-//         );
-
-//         if (course.is_public) {
-//           await client.query(
-//             `INSERT INTO course_public_stats (course_id, total_users_joined)
-//              VALUES ($1, 1)
-//              ON CONFLICT (course_id) DO UPDATE
-//              SET total_users_joined = course_public_stats.total_users_joined + 1, last_updated = NOW()`,
-//             [courseId]
-//           );
-//         }
-//       }
-
-//       // 3. Get missing subtopics
-//       const subRes = await client.query(`
-//         SELECT s.id, s.title, u.id AS unit_id, u.title AS unit_title
-//         FROM subtopics s
-//         JOIN units u ON s.unit_id = u.id
-//         WHERE u.course_id = $1 AND s.content IS NULL
-//         ORDER BY u.position, s.position
-//       `, [courseId]);
-
-//       const missingSubtopics = subRes.rows;
-//       if (missingSubtopics.length === 0) {
-//         send({ type: "complete", generated: 0, total: 0, message: "All content already generated" });
-//         res.end();
-//         return;
-//       }
-
-//       const total = missingSubtopics.length;
-//       let generated = 0;
-//       send({ type: "start", total, provider: providerName, isCerebras });
-
-//       // === GET LLM PROVIDER (ONLY 1 IMPORT) ===
-//       const llmProvider = getLLMProvider(providerName);
-
-//       // === PROCESS EACH SUBTOPIC ONE-BY-ONE (TOKEN STREAMING) ===
-//       for (const sub of missingSubtopics) {
-//         const input = {
-//           course_title: course.title,
-//           unit_title: sub.unit_title,
-//           subtopic_title: sub.title,
-//           difficulty: course.difficulty || "Beginner",
-//           want_youtube_keywords: course.include_videos
-//         };
-
-//         let fullResponse = "";
-//         let youtubeKeywords = [];
-
-//         try {
-//           // === TOKEN-BY-TOKEN STREAMING ===
-//           await llmProvider.streamContent(
-//             SUBTOPIC_BATCH_PROMPT, // ← Your single-subtopic prompt
-//             input,
-//             (chunk) => {
-//               console.log(chunk)
-//               fullResponse += chunk;
-//               send({ type: "chunk", subtopic: sub.title, chunk });
-//               if(res.flush){
-//                 res.flush()
-//               }
-//             },
-//             (err) => send({ type: "warning", message: `Stream error: ${err.message}` })
-//           );
-
-//           // === PARSE FINAL JSON ===
-//           const parsed = SubtopicBatchResponseSchema.safeParse(JSON.parse(fullResponse));
-//           if (!parsed.success) {
-//             send({ type: "warning", message: `Invalid JSON for: ${sub.title}` });
-//             continue;
-//           }
-
-//           const content = parsed.data;
-//           youtubeKeywords = content.youtube_keywords || [];
-
-//           // === SAVE TO DB ===
-//           await client.query(
-//             `UPDATE subtopics SET content = $1, content_generated_at = NOW() WHERE id = $2`,
-//             [JSON.stringify(content), sub.id]
-//           );
-
-//           generated++;
-//           send({
-//             type: "progress",
-//             subtopic: sub.title,
-//             unit: sub.unit_title,
-//             progress: Math.round((generated / total) * 100),
-//             generated,
-//             total
-//           });
-
-//           // === FIRE-AND-FORGET YOUTUBE (BACKGROUND) ===
-//           if (course.include_videos && youtubeKeywords.length > 0) {
-//             (async () => {
-//               try {
-//                 const videos = await fetchYoutubeVideos(youtubeKeywords);
-//                 for (const video of videos) {
-//                   const exists = await client.query(
-//                     `SELECT 1 FROM videos WHERE youtube_url = $1 AND subtopic_id = $2`,
-//                     [video.youtube_url, sub.id]
-//                   );
-//                   if (exists.rowCount === 0) {
-//                     await client.query(
-//                       `INSERT INTO videos (subtopic_id, title, youtube_url, thumbnail, duration_sec)
-//                        VALUES ($1, $2, $3, $4, $5)`,
-//                       [sub.id, video.title, video.youtube_url, video.thumbnail, video.duration_sec]
-//                     );
-//                   }
-//                 }
-//               } catch (e) {
-//                 console.error(`YouTube failed for ${sub.title}:`, e);
-//                 // Ignore — doesn't block stream
-//               }
-//             })();
-//           }
-
-//         } catch (err) {
-//           send({ type: "warning", message: `Failed: ${sub.title}` });
-//           console.error("Subtopic error:", err);
-//         }
-
-//         // Rate limit non-Cerebras
-//         if (!isCerebras) {
-//           await new Promise(r => setTimeout(r, 1500));
-//         }
-//       }
-
-//       // === FINAL STATUS ===
-//       await client.query(
-//         `INSERT INTO course_generation_status (course_id, status, total_subtopics, generated_subtopics, last_updated)
-//          VALUES ($1, 'completed', $2, $3, NOW())
-//          ON CONFLICT (course_id) DO UPDATE
-//          SET status = 'completed', generated_subtopics = $3, last_updated = NOW()`,
-//         [courseId, total, generated]
-//       );
-
-//       await client.query('COMMIT');
-//       send({ type: "complete", generated, total });
-
-//     } catch (err) {
-//       if (client) await client.query('ROLLBACK');
-//       send({ type: "error", message: err.message || "Generation failed" });
-//       console.error("Streaming generation failed:", err);
-//     } finally {
-//       if (client) client.release();
-//       res.end();
-//     }
-//   });
-// };
-
-
-// --------------------------------------------------------------------
-//Batchwise Stream generation
+// ============================================================
+//  SSE Streaming Course Generation
+// ============================================================
 export const streamCourseGeneration = async (req, res) => {
   const courseId = req.params.id;
   const userId = req.user?.id;
 
   // SSE Headers
   res.writeHead(200, {
-    'Content-Type': 'text/event-stream',
-    'Cache-Control': 'no-cache, no-transform',
-    'Connection': 'keep-alive',
-    'Access-Control-Allow-Origin': '*',
-    'X-Accel-Buffering': 'no'
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache, no-transform",
+    Connection: "keep-alive",
+    "Access-Control-Allow-Origin": "*",
+    "X-Accel-Buffering": "no",
   });
   res.flushHeaders();
 
   const send = (data) => {
     res.write(`data: ${JSON.stringify(data)}\n\n`);
-    if (typeof res.flush === 'function') res.flush();
+    if (typeof res.flush === "function") res.flush();
   };
 
-  let rawBody = '';
-  req.on('data', chunk => rawBody += chunk.toString());
-  req.on('end', async () => {
-    let providerName = 'Groq';
+  let rawBody = "";
+  req.on("data", (chunk) => (rawBody += chunk.toString()));
+  req.on("end", async () => {
+    let providerName = "Groq";
     let model = null;
 
-    // Parse request body
     if (rawBody) {
       try {
-        const cleaned = rawBody.replace(/,\s*}/g, '}').replace(/,\s*]/g, ']').trim();
+        const cleaned = rawBody.replace(/,\s*}/g, "}").replace(/,\s*]/g, "]").trim();
         const parsed = JSON.parse(cleaned);
-        providerName = (parsed.provider || 'Groq').trim();
+        providerName = (parsed.provider || "Groq").trim();
         model = parsed.model || null;
       } catch (e) {
         send({ type: "error", message: "Invalid request format" });
@@ -2518,52 +938,54 @@ export const streamCourseGeneration = async (req, res) => {
       }
     }
 
-    const isCerebras = providerName.toLowerCase() === 'cerebras';
-    let client;
+    const isCerebras = providerName.toLowerCase() === "cerebras";
 
     try {
-      client = await pool.connect();
-      await client.query('BEGIN');
-
       // 1. Verify ownership + get course
-      const courseRes = await client.query(
-        `SELECT title, difficulty, include_videos, is_public FROM courses WHERE id = $1 AND created_by = $2`,
-        [courseId, userId]
-      );
-      if (courseRes.rowCount === 0) {
+      const courseDoc = await coursesRef.doc(courseId).get();
+      if (!courseDoc.exists || courseDoc.data().created_by !== userId) {
         send({ type: "error", message: "Course not found or not owned" });
         res.end();
         return;
       }
-      const course = courseRes.rows[0];
+      const course = courseDoc.data();
 
       // 2. Auto-enroll
-      const enrollmentCheck = await client.query(
-        `SELECT 1 FROM user_courses WHERE user_id = $1 AND course_id = $2`,
-        [userId, courseId]
-      );
-      if (enrollmentCheck.rowCount === 0) {
-        await client.query(`INSERT INTO user_courses(user_id, course_id) VALUES($1, $2)`, [userId, courseId]);
+      const enrollmentId = `${userId}_${courseId}`;
+      const enrollDoc = await db.collection("user_courses").doc(enrollmentId).get();
+      if (!enrollDoc.exists) {
+        await db.collection("user_courses").doc(enrollmentId).set({
+          user_id: userId,
+          course_id: courseId,
+          joined_at: new Date(),
+        });
         if (course.is_public) {
-          await client.query(
-            `INSERT INTO course_public_stats (course_id, total_users_joined)
-             VALUES ($1, 1) ON CONFLICT (course_id) DO UPDATE
-             SET total_users_joined = course_public_stats.total_users_joined + 1, last_updated = NOW()`,
-            [courseId]
+          await db.collection("course_public_stats").doc(courseId).set(
+            { course_id: courseId, total_users_joined: FieldValue.increment(1), last_updated: new Date() },
+            { merge: true }
           );
         }
       }
 
-      // 3. Get missing subtopics
-      const subRes = await client.query(`
-        SELECT s.id, s.title, u.id AS unit_id, u.title AS unit_title, u.position AS unit_position
-        FROM subtopics s
-        JOIN units u ON s.unit_id = u.id
-        WHERE u.course_id = $1 AND s.content IS NULL
-        ORDER BY u.position, s.position
-      `, [courseId]);
+      // 3. Get missing subtopics (across all units)
+      const unitsSnap = await coursesRef.doc(courseId).collection("units").orderBy("position").get();
 
-      const missingSubtopics = subRes.rows;
+      const missingSubtopics = [];
+      for (const unitDoc of unitsSnap.docs) {
+        const subsSnap = await unitDoc.ref.collection("subtopics").orderBy("position").get();
+        for (const subDoc of subsSnap.docs) {
+          if (!subDoc.data().content) {
+            missingSubtopics.push({
+              id: subDoc.id,
+              title: subDoc.data().title,
+              unit_id: unitDoc.id,
+              unit_title: unitDoc.data().title,
+              unit_position: unitDoc.data().position,
+            });
+          }
+        }
+      }
+
       if (missingSubtopics.length === 0) {
         send({ type: "complete", generated: 0, total: 0, message: "All content already generated" });
         res.end();
@@ -2580,10 +1002,10 @@ export const streamCourseGeneration = async (req, res) => {
       const grouped = new Map();
       for (const sub of missingSubtopics) {
         if (!grouped.has(sub.unit_id)) {
-          grouped.set(sub.unit_id, { 
-            unit_title: sub.unit_title, 
-            unit_position: sub.unit_position, 
-            subtopics: [] 
+          grouped.set(sub.unit_id, {
+            unit_title: sub.unit_title,
+            unit_position: sub.unit_position,
+            subtopics: [],
           });
         }
         grouped.get(sub.unit_id).subtopics.push(sub);
@@ -2591,71 +1013,66 @@ export const streamCourseGeneration = async (req, res) => {
 
       // 5. Process based on provider type
       if (isCerebras) {
-        // CEREBRAS: Whole course in one batch (non-streaming)
-        await processCerebrasBatch(course, grouped, total, generated, send, client, llmProvider);
+        generated = await processCerebrasBatch(course, courseId, grouped, total, generated, send, llmProvider);
       } else {
-        // GROQ/GEMINI: 3-subtopic batches (streaming)
-        await processStreamingBatches(course, grouped, total, generated, send, client, llmProvider);
+        generated = await processStreamingBatches(course, courseId, grouped, total, generated, send, llmProvider);
       }
 
       // 6. Final status
-      await client.query(
-        `INSERT INTO course_generation_status (course_id, status, total_subtopics, generated_subtopics, last_updated)
-         VALUES ($1, 'completed', $2, $3, NOW())
-         ON CONFLICT (course_id) DO UPDATE
-         SET status = 'completed', generated_subtopics = $3, last_updated = NOW()`,
-        [courseId, total, generated]
+      await db.collection("course_generation_status").doc(courseId).set(
+        {
+          course_id: courseId,
+          status: "completed",
+          total_subtopics: total,
+          generated_subtopics: generated,
+          last_updated: new Date(),
+        },
+        { merge: true }
       );
 
-      await client.query('COMMIT');
       send({ type: "complete", generated, total });
-
     } catch (err) {
-      if (client) await client.query('ROLLBACK');
       send({ type: "error", message: err.message || "Generation failed" });
       console.error("Streaming generation failed:", err);
     } finally {
-      if (client) client.release();
       res.end();
     }
   });
 };
 
-async function processCerebrasBatch(course, grouped, total, generated, send, client, llmProvider) {
+// ============================================================
+//  Cerebras batch processor (entire course at once)
+// ============================================================
+async function processCerebrasBatch(course, courseId, grouped, total, generated, send, llmProvider) {
   console.log("Cerebras: Processing entire course in one batch");
-  
-  // Prepare input for entire course
+
   const units = Array.from(grouped.values())
     .sort((a, b) => a.unit_position - b.unit_position)
-    .map(unit => ({
+    .map((unit) => ({
       unit_title: unit.unit_title,
-      subtopics: unit.subtopics.map(s => s.title)
+      subtopics: unit.subtopics.map((s) => s.title),
     }));
 
   const input = {
     course_title: course.title,
     difficulty: course.difficulty,
     units: units,
-    want_youtube_keywords: course.include_videos
+    want_youtube_keywords: course.include_videos,
   };
 
   try {
-    // Get complete response in one go
     const result = await llmProvider(SUBTOPIC_BATCH_PROMPT, input);
-    
     const parsed = SubtopicBatchResponseSchema.safeParse(result);
     if (!parsed.success) {
       send({ type: "error", message: "Invalid LLM response from Cerebras" });
-      return;
+      return generated;
     }
 
-    // Save all content
     for (const content of parsed.data) {
-      // Find matching subtopic across all units
       let subtopic = null;
       for (const unit of grouped.values()) {
-        subtopic = unit.subtopics.find(s => 
-          s.title.toLowerCase().trim() === content.subtopic_title.toLowerCase().trim()
+        subtopic = unit.subtopics.find(
+          (s) => s.title.toLowerCase().trim() === content.subtopic_title.toLowerCase().trim()
         );
         if (subtopic) break;
       }
@@ -2665,61 +1082,65 @@ async function processCerebrasBatch(course, grouped, total, generated, send, cli
         continue;
       }
 
-      await client.query(
-        `UPDATE subtopics SET content = $1, content_generated_at = NOW() WHERE id = $2`,
-        [JSON.stringify(content), subtopic.id]
-      );
+      await coursesRef
+        .doc(courseId)
+        .collection("units")
+        .doc(subtopic.unit_id)
+        .collection("subtopics")
+        .doc(subtopic.id)
+        .update({ content: content, content_generated_at: new Date() });
 
       generated++;
-      
-      // Send progress update
       send({
         type: "progress",
         subtopic: subtopic.title,
         unit: subtopic.unit_title,
         progress: Math.round((generated / total) * 100),
         generated,
-        total
+        total,
       });
 
-      // TRULY ASYNC YouTube fetching (fire-and-forget)
       if (course.include_videos && content.youtube_keywords?.length) {
-        fetchYoutubeVideosInBackground(content.youtube_keywords, subtopic.id);
+        fetchYoutubeVideosInBackground(content.youtube_keywords, courseId, subtopic.unit_id, subtopic.id);
       }
     }
   } catch (err) {
     console.error("Cerebras batch processing error:", err);
     throw err;
   }
+
+  return generated;
 }
 
-async function processStreamingBatches(course, grouped, total, generated, send, client, llmProvider) {
+// ============================================================
+//  Streaming batch processor (3-subtopic batches)
+// ============================================================
+async function processStreamingBatches(course, courseId, grouped, total, generated, send, llmProvider) {
   console.log("Streaming: Processing in 3-subtopic batches");
-  
+
   const allBatches = [];
-  
-  // Create batches of 3 subtopics per unit
   for (const [unitId, unitData] of grouped) {
     const batches = chunkArray(unitData.subtopics, 3);
-    allBatches.push(...batches.map(batch => ({
-      unit_title: unitData.unit_title,
-      subtopics: batch
-    })));
+    allBatches.push(
+      ...batches.map((batch) => ({
+        unit_id: unitId,
+        unit_title: unitData.unit_title,
+        subtopics: batch,
+      }))
+    );
   }
 
-  // Process each batch
   for (const [batchIdx, batchData] of allBatches.entries()) {
     const batchInput = {
       course_title: course.title,
       unit_title: batchData.unit_title,
-      subtopics: batchData.subtopics.map(s => s.title),
+      subtopics: batchData.subtopics.map((s) => s.title),
       difficulty: course.difficulty || "Beginner",
-      want_youtube_keywords: course.include_videos
+      want_youtube_keywords: course.include_videos,
     };
 
     try {
       const batchRes = await llmProvider(SUBTOPIC_BATCH_PROMPT, batchInput);
-      
       if (!batchRes || !Array.isArray(batchRes)) {
         send({ type: "warning", message: `Invalid response for batch` });
         continue;
@@ -2731,135 +1152,148 @@ async function processStreamingBatches(course, grouped, total, generated, send, 
         continue;
       }
 
-      // Send chunk for streaming preview (3 subtopics at once)
       send({
         type: "chunk",
-        subtopic: `Batch ${batchIdx + 1}: ${batchData.subtopics.map(s => s.title).join(', ')}`,
+        subtopic: `Batch ${batchIdx + 1}: ${batchData.subtopics.map((s) => s.title).join(", ")}`,
         chunk: JSON.stringify(parsed.data, null, 2),
-        unit: batchData.unit_title
+        unit: batchData.unit_title,
       });
 
-      // Process each subtopic in batch
       for (const content of parsed.data) {
-        const subtopic = batchData.subtopics.find(s => 
-          s.title.toLowerCase().trim() === content.subtopic_title.toLowerCase().trim()
+        const subtopic = batchData.subtopics.find(
+          (s) => s.title.toLowerCase().trim() === content.subtopic_title.toLowerCase().trim()
         );
-        
+
         if (!subtopic) {
           send({ type: "warning", message: `No match for: ${content.subtopic_title}` });
           continue;
         }
 
-        await client.query(
-          `UPDATE subtopics SET content = $1, content_generated_at = NOW() WHERE id = $2`,
-          [JSON.stringify(content), subtopic.id]
-        );
+        await coursesRef
+          .doc(courseId)
+          .collection("units")
+          .doc(batchData.unit_id)
+          .collection("subtopics")
+          .doc(subtopic.id)
+          .update({ content: content, content_generated_at: new Date() });
 
         generated++;
-        
         send({
           type: "progress",
           subtopic: subtopic.title,
           unit: subtopic.unit_title,
           progress: Math.round((generated / total) * 100),
           generated,
-          total
+          total,
         });
 
-        // TRULY ASYNC YouTube fetching
         if (course.include_videos && content.youtube_keywords?.length) {
-          fetchYoutubeVideosInBackground(content.youtube_keywords, subtopic.id);
+          fetchYoutubeVideosInBackground(content.youtube_keywords, courseId, batchData.unit_id, subtopic.id);
         }
       }
 
       // Rate limit between batches
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      
+      await new Promise((resolve) => setTimeout(resolve, 1000));
     } catch (err) {
       send({ type: "warning", message: `Batch ${batchIdx + 1} failed` });
       console.error("Batch error:", err);
     }
   }
+
+  return generated;
 }
 
-// Fire-and-forget YouTube fetching - doesn't block the main process
-export async function fetchYoutubeVideosInBackground(keywords, subtopicId) {
+// ============================================================
+//  Fire-and-forget YouTube video fetching
+// ============================================================
+export async function fetchYoutubeVideosInBackground(keywords, courseId, unitId, subtopicId) {
   (async () => {
     try {
       const videos = await fetchYoutubeVideos(keywords);
       if (!Array.isArray(videos) || !videos.length) return;
 
-      const client = await pool.connect();
-      try {
-        for (const video of videos) {
-          const { title, youtube_url, thumbnail, duration_sec } = video;
-          const duration = duration_sec || null;
+      const videoCollRef = coursesRef
+        .doc(courseId)
+        .collection("units")
+        .doc(unitId)
+        .collection("subtopics")
+        .doc(subtopicId)
+        .collection("videos");
 
-          const exists = await client.query(
-            `SELECT 1 FROM videos WHERE youtube_url = $1 AND subtopic_id = $2`,
-            [youtube_url, subtopicId]
-          );
+      for (const video of videos) {
+        const { title, youtube_url, thumbnail, duration_sec } = video;
 
-          if (exists.rowCount === 0) {
-            await client.query(
-              `INSERT INTO videos (subtopic_id, title, youtube_url, thumbnail, duration_sec)
-               VALUES ($1, $2, $3, $4, $5)`,
-              [subtopicId, title, youtube_url, thumbnail, duration]
-            );
-          }
+        // Check for duplicate
+        const existing = await videoCollRef.where("youtube_url", "==", youtube_url).limit(1).get();
+        if (existing.empty) {
+          await videoCollRef.doc().set({
+            title,
+            youtube_url,
+            thumbnail,
+            duration_sec: duration_sec || null,
+          });
         }
-      } finally {
-        client.release();
       }
     } catch (e) {
-      console.error('Background YouTube fetch failed:', e);
+      console.error("Background YouTube fetch failed:", e);
     }
-  })(); // Immediately invoked, no await
+  })();
 }
 
-
-
-
-//----------------------------------------------------------------------
-
-
+// ============================================================
+//  GET /api/courses/:id/generation-status
+// ============================================================
 export const getCourseGenerationStatus = async (req, res) => {
   const courseId = req.params.id;
   const since = req.query.since;
 
   try {
-    const statusRes = await pool.query(
-      `
-      SELECT status, total_subtopics, generated_subtopics, last_updated
-      FROM course_generation_status
-      WHERE course_id = $1
-      `,
-      [courseId]
-    );
+    const statusDoc = await db.collection("course_generation_status").doc(courseId).get();
 
-    if (statusRes.rowCount === 0) {
+    if (!statusDoc.exists) {
       return res.status(404).json({ error: "No generation status found" });
     }
 
-    const status = statusRes.rows[0];
+    const status = statusDoc.data();
 
-    let subtopicsQuery = `
-      SELECT s.id, s.title, s.content, s.content_generated_at, u.title AS unit_title
-      FROM subtopics s
-      JOIN units u ON s.unit_id = u.id
-      WHERE u.course_id = $1 AND s.content IS NOT NULL
-    `;
+    // Get generated subtopics
+    const unitsSnap = await coursesRef.doc(courseId).collection("units").get();
+    const subtopics = [];
 
-    const params = [courseId];
+    for (const unitDoc of unitsSnap.docs) {
+      let query = unitDoc.ref
+        .collection("subtopics")
+        .where("content", "!=", null);
 
-    if (since) {
-      subtopicsQuery += " AND s.content_generated_at > $2::timestamptz";
-      params.push(since);
+      const subsSnap = await query.get();
+
+      for (const subDoc of subsSnap.docs) {
+        const data = subDoc.data();
+
+        // Filter by 'since' if provided
+        if (since && data.content_generated_at) {
+          const genTime = data.content_generated_at.toDate
+            ? data.content_generated_at.toDate()
+            : new Date(data.content_generated_at);
+          if (genTime <= new Date(since)) continue;
+        }
+
+        subtopics.push({
+          id: subDoc.id,
+          title: data.title,
+          content: typeof data.content === "string" ? JSON.parse(data.content) : data.content,
+          content_generated_at: data.content_generated_at,
+          unit_title: unitDoc.data().title,
+        });
+      }
     }
 
-    subtopicsQuery += " ORDER BY s.content_generated_at ASC";
-
-    const subtopicRes = await pool.query(subtopicsQuery, params);
+    // Sort by content_generated_at asc
+    subtopics.sort((a, b) => {
+      const aTime = a.content_generated_at?.toDate ? a.content_generated_at.toDate() : new Date(a.content_generated_at || 0);
+      const bTime = b.content_generated_at?.toDate ? b.content_generated_at.toDate() : new Date(b.content_generated_at || 0);
+      return aTime - bTime;
+    });
 
     return res.status(200).json({
       courseId,
@@ -2867,13 +1301,7 @@ export const getCourseGenerationStatus = async (req, res) => {
       totalSubtopics: status.total_subtopics,
       generatedSubtopics: status.generated_subtopics,
       lastUpdated: status.last_updated,
-      subtopics: subtopicRes.rows.map((s) => ({
-        id: s.id,
-        title: s.title,
-        content: JSON.parse(s.content),
-        content_generated_at: s.content_generated_at,
-        unit_title: s.unit_title,
-      })),
+      subtopics,
     });
   } catch (err) {
     console.error("getCourseGenerationStatus error:", err);
@@ -2881,448 +1309,328 @@ export const getCourseGenerationStatus = async (req, res) => {
   }
 };
 
-export const retryFailedSubtopics = async(req, res) => {
-    const courseId = req.params.id;
-    const userId = req.user?.id;
-    const provider = req.body.provider || 'Gemini';
-    const model = req.body.model || undefined;
-    if (!userId) return res.status(401).json({error: "Unauthorized"});
+// ============================================================
+//  POST /api/courses/:id/retry-failed-subtopics
+// ============================================================
+export const retryFailedSubtopics = async (req, res) => {
+  const courseId = req.params.id;
+  const userId = req.user?.id;
+  const provider = req.body.provider || "Groq";
+  const model = req.body.model || undefined;
 
-    try {
-        const courseRes = await pool.query("SELECT created_by FROM courses WHERE id = $1", [courseId]);
+  if (!userId) return res.status(401).json({ error: "Unauthorized" });
 
-        if (courseRes.rowCount === 0) {
-            return res.status(404).json({error: "Course Not Found"});
-        }
+  try {
+    const courseDoc = await coursesRef.doc(courseId).get();
+    if (!courseDoc.exists) return res.status(404).json({ error: "Course Not Found" });
 
-        const course = courseRes.rows[0];
-        if (course.created_by !== userId) {
-            return res.status(403).json({error: "Forbidden"});
-        }
-
-        // Counting how many subtopic need to retry
-        const subRes = await pool.query(`
-                    SELECT COUNT(*) FROM units u
-                    JOIN subtopics s ON u.id = s.unit_id
-                    WHERE u.course_id = $1 AND s.content IS NULL   
-            `, [courseId])
-
-        const missingCount = parseInt(subRes.rows[0].count || '0');
-        if (missingCount === 0) {
-            return res.status(200).json({
-                message: "No Failed subtopics found to retry",
-                status: "idle",
-                remaining_subtopics: 0
-            });
-        }
-
-        startBackgroundGeneration(courseId, userId, provider, model)
-        .then(() => {
-            console.log(`Retry background generation started for course: ${courseId}`);
-        })
-        .catch((err) => {
-            console.log(`Retry background generation failed for course: ${courseId}`, err);
-        })
-
-        await pool.query(`
-            INSERT INTO course_generation_status (course_id, status, total_subtopics, generated_subtopics, last_updated)
-            VALUES ($1, 'in_progress', $2, 0, NOW())
-            ON CONFLICT (course_id) DO UPDATE
-            SET status = 'in_progress', total_subtopics = $2, generated_subtopics = 0, last_updated = NOW()   
-        `, [courseId, missingCount]);
-
-        return res.status(202).json({
-            message: "Retry initiated for failed subtopics",
-            status: "in_progress",
-            remaining_subtopics: missingCount
-        })
-        
-    } catch (err) {
-        console.error("retryFailedSubtopics error:", err);
-        return res.status(500).json({ error: "Internal Server Error" });
+    if (courseDoc.data().created_by !== userId) {
+      return res.status(403).json({ error: "Forbidden" });
     }
 
-}
+    // Count missing subtopics
+    let missingCount = 0;
+    const unitsSnap = await coursesRef.doc(courseId).collection("units").get();
+    for (const unitDoc of unitsSnap.docs) {
+      const subsSnap = await unitDoc.ref.collection("subtopics").get();
+      for (const subDoc of subsSnap.docs) {
+        if (!subDoc.data().content) missingCount++;
+      }
+    }
 
-/*
-    GET -> /api/courses/search?query=ai 
-    for on typing search realtime small dropdown list shows up with less data 
-*/
+    if (missingCount === 0) {
+      return res.status(200).json({
+        message: "No Failed subtopics found to retry",
+        status: "idle",
+        remaining_subtopics: 0,
+      });
+    }
 
+    startBackgroundGeneration(courseId, userId, provider, model)
+      .then(() => console.log(`Retry background generation started for course: ${courseId}`))
+      .catch((err) => console.log(`Retry background generation failed for course: ${courseId}`, err));
 
-export const searchCourses = async(req, res) => {
-    try {
-        const {query} = req.query;
-        if (!query) {
-            return res.status(400).json({ error: "Query parameter is required" });
-        }
+    await db.collection("course_generation_status").doc(courseId).set(
+      {
+        course_id: courseId,
+        status: "in_progress",
+        total_subtopics: missingCount,
+        generated_subtopics: 0,
+        last_updated: new Date(),
+      },
+      { merge: true }
+    );
 
-        const searchQuery = `
-            SELECT id, title, created_by, u.username AS creator_name, 
-            FROM courses c
-            LEFT JOIN users u ON c.created_by = u.id
-            WHERE c.title LIKE $1
-            ORDER BY c.created_at DESC
-            LIMIT 5
-        `
-        const result = await pool.query(searchQuery, [`%${query}%`]);
-        return res.status(200).json({ courses: result.rows });
+    return res.status(202).json({
+      message: "Retry initiated for failed subtopics",
+      status: "in_progress",
+      remaining_subtopics: missingCount,
+    });
   } catch (err) {
-        console.error("searchCourses error:", err);
-        return res.status(500).json({ error: "Failed to search courses" });
+    console.error("retryFailedSubtopics error:", err);
+    return res.status(500).json({ error: "Internal Server Error" });
+  }
+};
+
+// ============================================================
+//  Search
+// ============================================================
+export const searchCourses = async (req, res) => {
+  try {
+    const { query } = req.query;
+    if (!query?.trim()) return res.status(400).json({ error: "Query required" });
+
+    // Firestore doesn't have ILIKE — use client-side filtering
+    const snapshot = await coursesRef
+      .where("is_public", "==", true)
+      .orderBy("created_at", "desc")
+      .limit(50) // fetch more, filter locally
+      .get();
+
+    const queryLower = query.toLowerCase();
+    const courses = [];
+
+    for (const doc of snapshot.docs) {
+      if (courses.length >= 5) break;
+      const data = doc.data();
+      if (data.title?.toLowerCase().includes(queryLower)) {
+        // Get creator name
+        let creator_name = "Unknown";
+        if (data.created_by) {
+          const userDoc = await db.collection("users").doc(data.created_by).get();
+          if (userDoc.exists) creator_name = userDoc.data().username;
+        }
+        courses.push({ id: doc.id, title: data.title, creator_name });
+      }
+    }
+
+    res.json({ courses });
+  } catch (err) {
+    console.error("searchCourses error:", err);
+    res.status(500).json({ error: "Search failed" });
+  }
+};
+
+export const searchCoursesFull = async (req, res) => {
+  try {
+    const { query = "", difficulty, sortBy } = req.query;
+    if (!query.trim()) return res.status(400).json({ error: "Query required" });
+
+    let firestoreQuery = coursesRef.where("is_public", "==", true);
+
+    // Add difficulty filter if provided
+    if (difficulty) {
+      firestoreQuery = firestoreQuery.where("difficulty", "==", difficulty);
+    }
+
+    // Sorting
+    switch (sortBy) {
+      case "Newest":
+        firestoreQuery = firestoreQuery.orderBy("created_at", "desc");
+        break;
+      default:
+        firestoreQuery = firestoreQuery.orderBy("created_at", "desc");
+    }
+
+    const snapshot = await firestoreQuery.limit(100).get(); // fetch more, filter locally
+
+    const queryLower = query.toLowerCase();
+    const courses = [];
+
+    for (const doc of snapshot.docs) {
+      if (courses.length >= 20) break;
+      const data = doc.data();
+      if (!data.title?.toLowerCase().includes(queryLower)) continue;
+
+      // Get creator name
+      let creator_name = "Unknown";
+      if (data.created_by) {
+        const userDoc = await db.collection("users").doc(data.created_by).get();
+        if (userDoc.exists) creator_name = userDoc.data().username;
+      }
+
+      // Get stats
+      let total_users_joined = 0;
+      const statsDoc = await db.collection("course_public_stats").doc(doc.id).get();
+      if (statsDoc.exists) total_users_joined = statsDoc.data().total_users_joined || 0;
+
+      courses.push({
+        id: doc.id,
+        title: data.title,
+        description: data.description,
+        difficulty: data.difficulty,
+        creator_name,
+        total_users_joined,
+        created_at: data.created_at,
+      });
+    }
+
+    // Sort by enrollment count if requested
+    if (sortBy === "Most_Enrolled") {
+      courses.sort((a, b) => b.total_users_joined - a.total_users_joined);
+    }
+
+    res.json({ courses });
+  } catch (err) {
+    console.error("searchCoursesFull error:", err);
+    res.status(500).json({ error: "Search failed" });
+  }
+};
+
+// ============================================================
+//  DELETE /api/courses/:id/unenroll
+// ============================================================
+export const unenrollFromCourse = async (req, res) => {
+  const userId = req.user?.id;
+  const courseId = req.params.id;
+
+  if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+  try {
+    const enrollmentId = `${userId}_${courseId}`;
+    const enrollDoc = await db.collection("user_courses").doc(enrollmentId).get();
+
+    if (!enrollDoc.exists) {
+      return res.status(400).json({ error: "Not enrolled in this course" });
+    }
+
+    await db.collection("user_courses").doc(enrollmentId).delete();
+
+    // Decrement stats
+    const statsRef = db.collection("course_public_stats").doc(courseId);
+    const statsDoc = await statsRef.get();
+    if (statsDoc.exists) {
+      const current = statsDoc.data().total_users_joined || 0;
+      await statsRef.update({
+        total_users_joined: Math.max(current - 1, 0),
+        last_updated: new Date(),
+      });
+    }
+
+    return res.status(200).json({ message: "Unenrolled Successfully" });
+  } catch (err) {
+    console.error("unenrollFromCourse error:", err);
+    return res.status(500).json({ error: "Failed to unenroll" });
+  }
+};
+
+// ============================================================
+//  Notes  (per subtopic, per user)
+// ============================================================
+export const saveNote = async (req, res) => {
+  const subtopicId = req.params.id;
+  const { note } = req.body;
+  const userId = req.user.id;
+
+  try {
+    const noteId = `${userId}_${subtopicId}`;
+    await db.collection("user_notes").doc(noteId).set(
+      {
+        user_id: userId,
+        subtopic_id: subtopicId,
+        note: note || "",
+        updated_at: new Date(),
+      },
+      { merge: true }
+    );
+    res.json({ message: "Note saved" });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to save note" });
+  }
+};
+
+export const getNote = async (req, res) => {
+  const subtopicId = req.params.id;
+  const userId = req.user.id;
+
+  try {
+    const noteId = `${userId}_${subtopicId}`;
+    const noteDoc = await db.collection("user_notes").doc(noteId).get();
+    res.json({ note: noteDoc.exists ? noteDoc.data().note : "" });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to get note" });
+  }
+};
+
+// ============================================================
+//  Progress tracking (per subtopic, per user)
+// ============================================================
+export const markComplete = async (req, res) => {
+  const subtopicId = req.params.id;
+  const { completed } = req.body;
+  const userId = req.user.id;
+
+  try {
+    const progressId = `${userId}_${subtopicId}`;
+    if (completed) {
+      await db.collection("user_progress").doc(progressId).set({
+        user_id: userId,
+        subtopic_id: subtopicId,
+        completed_at: new Date(),
+      });
+
+      await grantXpOnce(userId, `subtopic_complete_${subtopicId}`, 50, {
+        activityType: "subtopic_complete",
+        metadata: { subtopic_id: subtopicId, source: "manual_complete" },
+        statIncrements: {
+          subtopics_completed: 1,
+          quizzes_passed: 1,
+        },
+      });
+    } else {
+      await db.collection("user_progress").doc(progressId).delete();
+      await touchUserDailyActivity(userId, "subtopic_uncomplete", { subtopic_id: subtopicId });
+    }
+    res.json({ message: "Progress updated" });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to update progress" });
+  }
+};
+
+export const getProgress = async (req, res) => {
+  const { id: courseId } = req.params;
+  const userId = req.user.id;
+
+  try {
+    // We need to find all subtopic IDs for this course, then check progress
+    const unitsSnap = await coursesRef.doc(courseId).collection("units").get();
+    const subtopicIds = [];
+
+    for (const unitDoc of unitsSnap.docs) {
+      const subsSnap = await unitDoc.ref.collection("subtopics").get();
+      subsSnap.docs.forEach((d) => subtopicIds.push(d.id));
+    }
+
+    // Check progress for each subtopic
+    const progress = [];
+    for (const subtopicId of subtopicIds) {
+      const progressId = `${userId}_${subtopicId}`;
+      const progressDoc = await db.collection("user_progress").doc(progressId).get();
+      if (progressDoc.exists) {
+        progress.push({ subtopic_id: subtopicId, completed: true });
+      }
+    }
+
+    res.json(progress);
+  } catch (err) {
+    res.status(500).json({ error: "Failed to get progress" });
+  }
+};
+
+// ============================================================
+//  Safe JSON parser
+// ============================================================
+function safeJsonParse(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    const cleaned = text.replace(/```json\n?/g, "").replace(/```/g, "").trim();
+    try {
+      return JSON.parse(cleaned);
+    } catch {
+      return null;
+    }
   }
 }
-/*
-   GET -> /api/courses/search?query=ai&difficulty=Beginner&sort=most_enrolled
-   for big search on that search button click and with filtering and sorting options
-*/
-
-export const searchCoursesFull = async(req, res) => {
-    try{
-        const {query = "", difficulty, sortBy} = req.query;
-
-        if (!query || query.trim() === "") {
-            return res.status(400).json({error: "Search Query Is Required"});  
-        } 
-
-        let baseQuery = `
-            SELECT 
-                c.id,
-                c.title,
-                c.description, 
-                c.difficulty,
-                c.created_by,
-                u.username AS creator_name,
-                COALESCE(stats.total_users_joined, 0) AS total_users_joined
-                c.created_at
-            FROM courses c
-            LEFT JOIN users u ON c.created_by = u.id
-            LEFT JOIN course_public_stats stats ON c.id = stats.course_id
-            WHERE c.is_public = TRUE
-        `
-
-        const params = [];
-        let paramIndex = 1;
-
-        if (query) {
-            baseQuery += ` AND c.title ILIKE $${paramIndex}`;
-            params.push(query);
-            paramIndex++;
-        }
-
-        if (difficulty) {
-            baseQuery += ` AND c.difficulty = $${paramIndex}`;
-            params.push(difficulty);
-            paramIndex++;
-        }
-
-        if (sortBy) {
-            switch (sortBy) {
-                case "Newest":
-                    baseQuery += ' ORDER BY c.created_at DESC';
-                    break;
-                case "Oldest":
-                    baseQuery += ' ORDER BY c.created_by ASC';
-                    break;
-                case "Most_Enrolled":
-                    baseQuery += ' ORDER BY total_users_joined DESC';
-                    break;
-                case 'difficulty_asc':
-                    baseQuery += ' ORDER BY c.difficulty ASC';
-                    break;
-                case 'difficulty_desc':
-                    baseQuery += ' ORDER BY c.difficulty DESC';
-                    break;
-                default:
-                    baseQuery += ' ORDER BY c.created_at DESC'; // default sorting
-            }
-        }
-
-        baseQuery += ' LIMIT 20';
-
-        const result = await pool.query(baseQuery, params);
-        res.status(200).json({ courses: result.rows });
-    }catch(error){
-        console.error('searchCourses error:', err);
-        res.status(500).json({ error: 'Failed to search courses' });
-    }
-
-}
-
-/*
-    GET ->  /api/courses/search?query=AI&difficulties=Beginner,Intermediate&sortBy=popularity&sortDirection=desc
-
-*/
-
-// export const searchCourses = async (req, res) => {
-//   try {
-//     const { query, difficulties, sortBy, sortDirection } = req.query;
-//     // query: string to match course title
-//     // difficulties: comma separated string e.g. "Beginner,Advanced"
-//     // sortBy: "created_at" | "popularity" | "difficulty"
-//     // sortDirection: "asc" or "desc"
-
-//     const userInput = `%${query || ''}%`;
-
-//     let baseQuery = `
-//       SELECT 
-//         c.id,
-//         c.title,
-//         c.description, 
-//         c.difficulty,
-//         c.created_by,
-//         u.username AS creator_name,
-//         COALESCE(stats.total_users_joined, 0) AS total_users_joined
-//       FROM courses c
-//       LEFT JOIN users u ON c.created_by = u.id
-//       LEFT JOIN course_public_stats stats ON c.id = stats.course_id
-//       WHERE c.is_public = TRUE AND c.title ILIKE $1
-//     `;
-
-//     const params = [userInput];
-//     let paramIndex = 2; // track parameter index for SQL placeholders
-
-//     // Handle difficulty filtering (multiple allowed)
-//     if (difficulties) {
-//       const difficultyList = difficulties.split(',').map(d => d.trim());
-//       const placeholders = difficultyList.map(() => `$${paramIndex++}`).join(', ');
-//       baseQuery += ` AND c.difficulty IN (${placeholders})`;
-//       params.push(...difficultyList);
-//     }
-
-//     // Validate sortBy field
-//     const validSortFields = {
-//       created_at: 'c.created_at',
-//       popularity: 'total_users_joined',
-//       difficulty: 'c.difficulty',
-//     };
-
-//     let orderByField = validSortFields[sortBy] || 'c.created_at';
-
-//     // Validate sortDirection
-//     let orderDirection = (sortDirection && sortDirection.toUpperCase() === 'ASC') ? 'ASC' : 'DESC';
-
-//     baseQuery += ` ORDER BY ${orderByField} ${orderDirection}`;
-
-//     baseQuery += ' LIMIT 20';
-
-//     const result = await pool.query(baseQuery, params);
-//     res.status(200).json({ courses: result.rows });
-//   } catch (err) {
-//     console.error('searchCourses error:', err);
-//     res.status(500).json({ error: 'Failed to search courses' });
-//   }
-// };
-
-
-
-/*
-    DELETE -> /api/courses/:id/unenroll
-*/
-
-export const unenrollFromCourse = async(req, res) => {
-    const userId = req.user?.id;
-    const courseId = req.params.id;
-
-    if (!userId) return res.status(401).json({error: "Unauthorized"});
-
-    try {
-        const enrolled = await pool.query(`SELECT 1 FROM user_courses WHERE user_id = $1 AND course_id = $2`, [userId, courseId]);
-
-        if (enrolled.rowCount === 0) return res.status(400).josn({error: "Not enrolled in this course"});
-
-        await pool.query(`
-            DELETE FROM user_courses WHERE user_id = $1 AND course_id = $2            
-        `, [userId, courseId]);
-
-        await pool.query(`
-                UPDATE course_public_stats 
-                SET total_users_joined = GREATEST(total_users_joined - 1, 0), last_updated = NOW()
-                WHERE course_id = $1
-        `, [courseId]);
-
-        return res.status(200).json({message: "Unerolled Successfully"});
-    } catch (error) {
-        console.error("unenrollFromCourse error:", err);
-        return res.status(500).json({ error: "Failed to unenroll" });
-    }
-}
-
-
-//export const generateSubtopicAndRelatedContent = async (req, res) => {
-//     const subtopicId = req.params.id;
-//     const userId = req.user?.id;
-//     const provider = req.
-
-//     if (!userId) return res.status(401).json({ error: "Unauthorized" });
-
-//     try {
-//         // 1. Get subtopic, unit, and course details
-//         const subtopicRes = await pool.query(
-//             `SELECT s.id, s.title, s.content, s.unit_id, u.course_id, u.title AS unit_title, c.title AS course_title, c.include_videos, c.difficulty AS course_difficulty, c.created_by
-//             FROM subtopics s
-//             JOIN units u ON s.unit_id = u.id
-//             JOIN courses c ON u.course_id = c.id
-//             WHERE s.id = $1`,
-//             [subtopicId]
-//         );
-
-//         if (subtopicRes.rowCount === 0)
-//             return res.status(404).json({ error: "Subtopic not found" });
-
-//         const subtopic = subtopicRes.rows[0];
-
-//         // if (
-//         //     subtopic.created_by !== userId &&
-//         //     !(await pool.query(
-//         //         `SELECT 1 FROM user_courses WHERE user_id = $1 AND course_id = $2`,
-//         //         [userId, subtopic.course_id]
-//         //     )).rowCount
-//         // ) {
-//         //     return res.status(403).json({ error: "Forbidden" });
-//         // }
-//         const isCreator = subtopic.created_by === userId;
-//         const isEnrolled = (
-//             await pool.query(
-//                 `SELECT 1 FROM user_courses WHERE user_id = $1 AND course_id = $2`,
-//                 [userId, subtopic.course_id]
-//             )
-//         ).rowCount > 0;
-
-//         if (!isCreator && !isEnrolled)
-//             return res.status(403).json({ error: "Forbidden" });
-
-//         const { unit_id, course_id, course_title, unit_title,  course_difficulty: courseDifficulty, include_videos } = subtopic;
-
-//         // 2. Get siblings (subtopics in same unit)
-//         const siblingsRes = await pool.query(
-//             `SELECT id, title, content FROM subtopics WHERE unit_id = $1 ORDER BY position ASC`,
-//             [unit_id]
-//         );
-//         const siblings = siblingsRes.rows;
-
-//         // 3. Get next unit's subtopics
-//         const nextUnitRes = await pool.query(
-//             `SELECT id, title FROM units WHERE course_id = $1 AND position > (SELECT position FROM units WHERE id = $2) ORDER BY position ASC LIMIT 1`,
-//             [course_id, unit_id]
-//         );
-//         let nextUnitSubtopics = [];
-//         if (nextUnitRes.rowCount > 0) {
-//             const nextUnitId = nextUnitRes.rows[0].id;
-//             const nextSubsRes = await pool.query(
-//                 `SELECT id, title, content FROM subtopics WHERE unit_id = $1 ORDER BY position ASC`,
-//                 [nextUnitId]
-//             );
-//             nextUnitSubtopics = nextSubsRes.rows;
-//         }
-
-//         // 4. Collect all subtopics to generate if content missing:
-//         // clicked subtopic + siblings + next unit subtopics
-//         const toGenerate = [
-//             ...siblings.filter(s => !s.content),
-//             ...nextUnitSubtopics.filter(s => !s.content),
-//         ];
-
-//         // // Ensure clicked subtopic is included
-//         // if (!subtopic.content) {
-//         //     toGenerate.push({
-//         //         id: subtopic.id,
-//         //         title: subtopic.title,
-//         //         // difficulty: difficulty || "Beginner", // Use course's difficulty
-//         //     });
-//         // }
-
-//         // // Deduplicate by id
-//         // const uniqueToGenerate = [];
-//         // const seenIds = new Set();
-//         // for (const st of toGenerate) {
-//         //     if (!seenIds.has(st.id)) {
-//         //         seenIds.add(st.id);
-//         //         uniqueToGenerate.push(st);
-//         //     }
-//         // }
-
-//         const seenIds = new Set(toGenerate.map(s => s.id));
-//         if (!subtopic.content && !seenIds.has(subtopic.id)) {
-//             toGenerate.push({ id: subtopic.id, title: subtopic.title });
-//         }
-
-//         const uniqueToGenerate = [];
-//         const uniqueIds = new Set();
-//         for (const sub of toGenerate) {
-//             if (!uniqueIds.has(sub.id)) {
-//                 uniqueIds.add(sub.id);
-//                 uniqueToGenerate.push(sub);
-//              }
-//         }
-
-//         // 5. Generate content for missing ones
-//         for (const sub of uniqueToGenerate) {
-//             const result = await llm(
-//                 {
-//                     course_id,
-//                     course_title,
-//                     unit_title,
-//                     subtopic_title: sub.title,
-//                     difficulty: courseDifficulty || "Beginner", // Using course's difficulty
-//                 },
-//                 SUBTOPIC_SYSTEM_PROMPT
-//             );
-
-            
-//             if (!result?.content) {
-//                 console.warn(`No content returned for subtopic: ${sub.title}`);
-//                 continue;
-//             }
-
-//             const contentJson = result.content;
-
-//             // Save content
-//             await pool.query(
-//                 `UPDATE subtopics SET content = $1 WHERE id = $2`,
-//                 [JSON.stringify(contentJson), sub.id]
-//             );
-
-//             // Optionally handle YouTube keywords
-//             if (result.includeVideos && contentJson.youtube_keywords?.length) {
-//                 for (const keyword of contentJson.youtube_keywords) {
-//                     console.log(`Queue video search for keyword: ${keyword}`);
-//                 }
-//             }
-//         }
-
-//         // 6. Return clicked subtopic content + siblings + next unit subtopics content from DB (fresh)
-//         const finalSiblingsRes = await pool.query(
-//             `SELECT id, title, content FROM subtopics WHERE unit_id = $1 ORDER BY position ASC`,
-//             [unit_id]
-//         );
-//         const finalSiblings = finalSiblingsRes.rows;
-
-//         let finalNextUnitSubtopics = [];
-//         if (nextUnitRes.rowCount > 0) {
-//             const nextUnitId = nextUnitRes.rows[0].id;
-//             const nextSubsRes = await pool.query(
-//                 `SELECT id, title, content FROM subtopics WHERE unit_id = $1 ORDER BY position ASC`,
-//                 [nextUnitId]
-//             );
-//             finalNextUnitSubtopics = nextSubsRes.rows;
-//         }
-
-//         res.status(200).json({
-//             clickedSubtopicId: subtopicId,
-//             siblings: finalSiblings,
-//             nextUnitSubtopics: finalNextUnitSubtopics,
-//         });
-//     } catch (err) {
-//         console.error("generateSubtopicAndRelatedContent error:", err);
-//         res.status(500).json({ error: "Failed to generate subtopic content" });
-//     }
-// };
-//     // function chunkArray(arr, size) {
-//     //   const chunks = [];
-//     //   for (let i = 0; i < arr.length; i += size) {
-//     //     chunks.push(arr.slice(i, i + size));
-//     //   }
-//     //   return chunks;
-//     // }
-

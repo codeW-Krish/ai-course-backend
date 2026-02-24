@@ -10,7 +10,7 @@ export const LLM_PROVIDERS = {
   GLM: generateResponseWithGLM,
 };
 
-export const getLLMProvider = (provider = "Gemini", model) => {
+export const getLLMProvider = (provider = "Groq", model) => {
   const fn = LLM_PROVIDERS[provider];
   if (!fn) {
     throw new Error(`LLM PROVIDER ${provider} NOT SUPPORTED`);
