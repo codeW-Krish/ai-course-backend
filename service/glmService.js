@@ -1,6 +1,6 @@
 import { OpenAI } from "openai";
 import dotenv from "dotenv";
-import JSON5 from "json5";
+import { parseJsonResponse } from "../utils/jsonParser.js";
 
 dotenv.config();
 
@@ -26,18 +26,6 @@ export const generateResponseWithGLM = async (systemPrompt, userInputs) => {
   const content = completion.choices?.[0]?.message?.content;
   if (!content) throw new Error("No content from GLM");
 
-  const jsonMatch = content.match(/```json\s*([\s\S]*?)```/i) ||
-                    content.match(/```([\s\S]*?)```/i);
-  const jsonStr = jsonMatch ? jsonMatch[1] : content;
-
-  try {
-    return JSON5.parse(jsonStr);
-  } catch (e) {
-    const start = jsonStr.indexOf("{");
-    const end = jsonStr.lastIndexOf("}");
-    if (start !== -1 && end !== -1 && end > start) {
-      return JSON5.parse(jsonStr.slice(start, end + 1));
-    }
-    throw new Error("Failed to parse JSON from GLM response");
-  }
+  console.log("RAW response from GLM: ", content);
+  return parseJsonResponse(content);
 };

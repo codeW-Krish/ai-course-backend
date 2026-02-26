@@ -1,6 +1,6 @@
 import dotenv from "dotenv";
 import { GoogleGenerativeAI } from "@google/generative-ai";
-import JSON5 from "json5";
+import { parseJsonResponse } from "../utils/jsonParser.js";
 
 dotenv.config();
 
@@ -19,30 +19,19 @@ export const generateResponseWithGemini = async (systemPrompt, userInputs) => {
   const result = await model.generateContent(prompt);
   const text = result.response.text();
   console.log("Raw Gemini Response:\n", text);
-
-  const jsonMatch = text.match(/```json\s*([\s\S]*?)```/);
-  const jsonStr = jsonMatch ? jsonMatch[1] : text;
-
-  let parsed;
-  try {
-    parsed = JSON5.parse(jsonStr);
-  } catch (e) {
-    console.warn("Initial JSON.parse failed. Attempting to clean...");
-    const firstBrace = jsonStr.indexOf("{");
-    const lastBrace = jsonStr.lastIndexOf("}");
-    if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
-      const sliced = jsonStr.slice(firstBrace, lastBrace + 1);
-      try {
-        parsed = JSON.parse(sliced);
-      } catch (innerErr) {
-        console.error("Cleaned JSON parse failed:", innerErr.message);
-        console.error("Problematic JSON:\n", sliced);
-        throw new Error("Gemini returned invalid JSON even after cleaning.");
-      }
-    } else {
-      throw new Error("Gemini did not return any valid JSON block.");
-    }
-  }
-
-  return parsed;
+  return parseJsonResponse(text);
 };
+
+export const generateChatResponseWithGemini = async (systemPrompt, userMessages) => {
+  // userMessages can be a simple string or an array of history. 
+  // keeping it simple for now: systemPrompt combines context + user query.
+
+  try {
+    const result = await model.generateContent(systemPrompt);
+    const text = result.response.text();
+    return text;
+  } catch (error) {
+    console.error("Gemini Chat Error:", error);
+    throw new Error("Failed to generate chat response");
+  }
+}
