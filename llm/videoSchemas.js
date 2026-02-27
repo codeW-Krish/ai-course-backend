@@ -70,22 +70,28 @@ export const VideoScriptSchema = z.object({
 const DiagramNodeSchema = z.object({
   id: z.string(),
   label: z.string(),
-  shape: z.enum(["circle", "rect", "diamond", "rounded_rect"]).optional().default("rounded_rect"),
+  shape: z.string().transform((v) => ["circle", "rect", "diamond", "rounded_rect"].includes(v) ? v : "rounded_rect").optional().default("rounded_rect"),
   color: z.string().optional().default("#4F86F7"),
 });
 
-// Diagram connection
+// Diagram connection — LLM sometimes uses source/target instead of from/to
 const DiagramConnectionSchema = z.object({
-  from: z.string(),
-  to: z.string(),
+  from: z.string().optional(),
+  to: z.string().optional(),
+  source: z.string().optional(),
+  target: z.string().optional(),
   label: z.string().optional().default(""),
-});
+}).transform((c) => ({
+  from: c.from || c.source || "",
+  to: c.to || c.target || "",
+  label: c.label || "",
+}));
 
 // Timeline event
 const TimelineEventSchema = z.object({
   label: z.string(),
   description: z.string().optional().default(""),
-  year: z.string().optional().default(""),
+  year: z.union([z.string(), z.number()]).transform(String).optional().default(""),
 });
 
 // Comparison item
@@ -98,10 +104,10 @@ const ComparisonItemSchema = z.object({
 // Subscene plan
 export const SubsceneSchema = z.object({
   step: z.number(),
-  text: z.string().min(1),
+  text: z.string().default(""),
   highlight: z.string().optional().default(""),
   scene_type: z.enum(SCENE_TYPES).optional(),
-  animation_style: z.enum(ANIMATION_STYLES).optional().default("fade"),
+  animation_style: z.string().transform((v) => ANIMATION_STYLES.includes(v) ? v : "fade").optional().default("fade"),
   text_overlay: z.string().optional().default(""),
   duration_hint_seconds: z.number().optional().default(4),
 });
@@ -110,8 +116,8 @@ export const SubsceneSchema = z.object({
 export const ScenePlanSchema = z.object({
   chunk_index: z.number(),
   scene_type: z.enum(SCENE_TYPES),
-  animation_style: z.enum(ANIMATION_STYLES),
-  transition_hint: z.enum(TRANSITION_TYPES).optional().default("crossfade"),
+  animation_style: z.string().transform((v) => ANIMATION_STYLES.includes(v) ? v : "fade").default("fade"),
+  transition_hint: z.string().transform((v) => TRANSITION_TYPES.includes(v) ? v : "crossfade").optional().default("crossfade"),
 
   // For illustration scenes
   image_prompt: z.string().optional().default(""),
@@ -119,7 +125,10 @@ export const ScenePlanSchema = z.object({
   // For diagram scenes
   diagram_nodes: z.array(DiagramNodeSchema).optional().default([]),
   diagram_connections: z.array(DiagramConnectionSchema).optional().default([]),
-  diagram_layout: z.enum(["flowchart", "tree", "circular", "layered"]).optional().default("flowchart"),
+  diagram_layout: z.union([
+    z.enum(["flowchart", "tree", "circular", "layered"]),
+    z.literal(""),
+  ]).transform((v) => v || "flowchart").optional().default("flowchart"),
 
   // For code scenes
   code_content: z.string().optional().default(""),

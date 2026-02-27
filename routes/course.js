@@ -13,6 +13,10 @@ router.get("/me", authMiddleware, getCoursesCreatedByMe);
 // Get courses enrolled by the logged-in user
 router.get("/me/enrolled", authMiddleware, getCoursesEnrolledByMe);
 
+// Search (must be before /:id routes to avoid "search" being captured as :id)
+router.get("/search", searchCourses);
+router.get("/search/full", searchCoursesFull);
+
 // Generate course outline using LLM (Gemini)
 router.post("/generate-outline", authMiddleware, generateCourseOutline);
 
@@ -48,9 +52,6 @@ router.post("/:id/retry-failed-subtopics", authMiddleware, retryFailedSubtopics)
 
 // To Check the generation status for poling 
 router.get("/:id/generation-status", authMiddleware, getCourseGenerationStatus)
-
-router.get("/search", searchCourses);
-router.get("/search/full", searchCoursesFull);
 
 router.post("/subtopics/:id/notes", authMiddleware, saveNote);
 router.get("/subtopics/:id/notes", authMiddleware, getNote);

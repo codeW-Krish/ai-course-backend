@@ -61,6 +61,49 @@ export async function uploadAudio(buffer, filename) {
 }
 
 /**
+ * Upload an image buffer (PNG) to ImageKit.
+ * @param {Buffer} buffer  – PNG image buffer
+ * @param {string} filename – e.g. "scene_0.png"
+ * @param {string} folder   – ImageKit folder, default "/video-assets"
+ * @returns {Promise<Object>} - The ImageKit upload result { url, fileId, ... }
+ */
+export async function uploadImage(buffer, filename, folder = "/video-assets") {
+    console.log(`🚀 Uploading image to ImageKit: ${filename} (${buffer.length} bytes)`);
+
+    const privateKey = process.env.IMAGEKIT_PRIVATE_KEY;
+    if (!privateKey) throw new Error("IMAGEKIT_PRIVATE_KEY is missing");
+
+    const authHeader = Buffer.from(`${privateKey}:`).toString("base64");
+
+    const form = new FormData();
+    form.append("file", buffer, {
+        filename,
+        contentType: "image/png",
+    });
+    form.append("fileName", filename);
+    form.append("folder", folder);
+    form.append("useUniqueFileName", "true");
+    form.append("tags", "video,scene,education");
+
+    try {
+        const response = await axios.post("https://upload.imagekit.io/api/v1/files/upload", form, {
+            headers: {
+                Authorization: `Basic ${authHeader}`,
+                ...form.getHeaders(),
+            },
+            maxBodyLength: Infinity,
+        });
+
+        console.log(`✅ Image uploaded: ${response.data.url}`);
+        return response.data;
+    } catch (err) {
+        const errMsg = err.response?.data?.message || err.message;
+        console.error("❌ ImageKit image upload failed:", errMsg);
+        throw new Error(`ImageKit upload error: ${errMsg}`);
+    }
+}
+
+/**
  * Delete an audio file from ImageKit by fileId.
  * @param {string} fileId - The ImageKit fileId
  */

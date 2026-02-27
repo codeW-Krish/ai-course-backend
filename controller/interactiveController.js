@@ -1184,6 +1184,10 @@ export const getHubHistory = async (req, res) => {
                 const hasAudio = audioDoc.exists;
                 const hasContent = !!subData.content;
 
+                // Check for generated video manifest
+                const videoDoc = await db.collection("video_manifests").doc(`manifest_${subtopicId}`).get();
+                const hasVideo = videoDoc.exists;
+
                 subtopicStatuses[subtopicId] = {
                     title: subData.title,
                     unit_title: unitData.title,
@@ -1191,10 +1195,11 @@ export const getHubHistory = async (req, res) => {
                     has_notes: hasNotes,
                     has_audio: hasAudio,
                     has_content: hasContent,
+                    has_video: hasVideo,
                 };
 
                 // Add to generated items list (only if something has been generated)
-                if (hasFlashcards || hasNotes || hasAudio) {
+                if (hasFlashcards || hasNotes || hasAudio || hasVideo) {
                     const features = [];
                     if (hasNotes) features.push("notes");
                     if (hasFlashcards) features.push("flashcards");
@@ -1229,6 +1234,19 @@ export const getHubHistory = async (req, res) => {
                             subtopic_title: subData.title,
                             unit_title: unitData.title,
                             card_count: fcCount.size,
+                        });
+                    }
+                    if (hasVideo) {
+                        const videoData = videoDoc.data();
+                        generatedItems.push({
+                            type: "video",
+                            subtopic_id: subtopicId,
+                            subtopic_title: subData.title,
+                            unit_title: unitData.title,
+                            generated_at: videoData.generated_at?.toDate?.() || videoData.generated_at || null,
+                            estimated_duration: videoData.total_duration_seconds
+                                ? Math.round(videoData.total_duration_seconds)
+                                : 0,
                         });
                     }
                 }
