@@ -43,7 +43,12 @@ app.use("/api/analytics", analyticsRouter);
 app.use("/api/users", userRouter);
 
 app.get("/", (req, res) => {
-    res.send("Hello, Index Page and Ngrok is working");
+    res.send("AI Learner API is running");
+});
+
+// Health check endpoint for Render
+app.get("/api/health", (req, res) => {
+    res.status(200).json({ status: "ok", timestamp: new Date().toISOString() });
 });
 
 app.listen(PORT, '0.0.0.0', () => {
