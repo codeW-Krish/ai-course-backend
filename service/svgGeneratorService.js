@@ -304,6 +304,7 @@ function calculateLayout(nodes, layout) {
 
 // ─────────────────────────────────────────
 //  2. CODE BLOCK GENERATOR
+//  Optimized for portrait phone viewing with larger fonts
 // ─────────────────────────────────────────
 
 export function generateCodeSVG(scenePlan) {
@@ -311,60 +312,71 @@ export function generateCodeSVG(scenePlan) {
   const language = scenePlan.code_language || "javascript";
   const highlightLines = scenePlan.highlight_lines || [];
 
-  const lines = code.split("\n");
-  const lineHeight = 28;
-  const startY = 140;
-  const startX = PADDING + 80;
-  const codeAreaH = lines.length * lineHeight + 60;
+  // Larger line height and fonts for readability on phones
+  const lines = code.split("\n").slice(0, 15); // Limit to 15 lines max
+  const lineHeight = 44;
+  const codeFontSize = 30;
+  const lineNumFontSize = 22;
+  const titleBarHeight = 70;
+  const sidePadding = 50; // Reduced to maximize code area
+  const lineNumWidth = 70;
+  
+  const startY = PADDING + titleBarHeight + 35;
+  const startX = sidePadding + lineNumWidth + 25;
+  const codeAreaH = lines.length * lineHeight + 50;
 
   let elements = svgHeader();
 
-  // Title bar
+  // Code container with title bar
   elements += `
-  <rect x="${PADDING}" y="80" width="${CANVAS_W - PADDING * 2}" height="${codeAreaH + 60}"
-    rx="16" fill="${PALETTE.codeBg}" stroke="${PALETTE.nodeStroke}" stroke-width="1.5" filter="url(#shadow)"/>
+  <rect x="${sidePadding}" y="${PADDING}" width="${CANVAS_W - sidePadding * 2}" height="${titleBarHeight + codeAreaH}"
+    rx="20" fill="${PALETTE.codeBg}" stroke="${PALETTE.nodeStroke}" stroke-width="2" filter="url(#shadow)"/>
   
-  <!-- Window dots -->
-  <circle cx="${PADDING + 28}" cy="108" r="7" fill="#FF5F56"/>
-  <circle cx="${PADDING + 52}" cy="108" r="7" fill="#FFBD2E"/>
-  <circle cx="${PADDING + 76}" cy="108" r="7" fill="#27C93F"/>
+  <!-- Title bar background -->
+  <rect x="${sidePadding}" y="${PADDING}" width="${CANVAS_W - sidePadding * 2}" height="${titleBarHeight}"
+    rx="20" fill="${PALETTE.nodeStroke}40"/>
   
-  <!-- Language label -->
-  <text x="${CANVAS_W - PADDING - 20}" y="112" text-anchor="end"
-    font-family="${FONT_FAMILY}" font-size="13" fill="${PALETTE.textDim}">
+  <!-- Window dots (bigger for visibility) -->
+  <circle cx="${sidePadding + 28}" cy="${PADDING + titleBarHeight / 2}" r="9" fill="#FF5F56"/>
+  <circle cx="${sidePadding + 58}" cy="${PADDING + titleBarHeight / 2}" r="9" fill="#FFBD2E"/>
+  <circle cx="${sidePadding + 88}" cy="${PADDING + titleBarHeight / 2}" r="9" fill="#27C93F"/>
+  
+  <!-- Language label (bigger) -->
+  <text x="${CANVAS_W - sidePadding - 25}" y="${PADDING + titleBarHeight / 2 + 8}" text-anchor="end"
+    font-family="${FONT_FAMILY}" font-size="22" font-weight="600" fill="${PALETTE.textMuted}">
     ${escapeXml(language)}
   </text>`;
 
-  // Code lines
+  // Code lines with larger fonts
   for (let i = 0; i < lines.length; i++) {
     const y = startY + i * lineHeight;
     const isHighlight = highlightLines.includes(i + 1);
     const animDelay = i * 0.08;
 
-    // Highlight background
+    // Highlight background (taller for bigger text)
     if (isHighlight) {
       elements += `
-      <rect x="${PADDING + 10}" y="${y - 18}" width="${CANVAS_W - PADDING * 2 - 20}" height="${lineHeight}"
-        rx="4" fill="${PALETTE.primary}15" opacity="0">
+      <rect x="${sidePadding + 15}" y="${y - 26}" width="${CANVAS_W - sidePadding * 2 - 30}" height="${lineHeight}"
+        rx="6" fill="${PALETTE.primary}15" opacity="0">
         <animate attributeName="opacity" from="0" to="1"
           dur="0.3s" begin="${animDelay + 0.5}s" fill="freeze"/>
       </rect>`;
     }
 
-    // Line number
+    // Line number (larger)
     elements += `
-    <text x="${PADDING + 40}" y="${y}" text-anchor="end" dominant-baseline="middle"
-      font-family="${FONT_FAMILY_MONO}" font-size="14" fill="${PALETTE.textDim}" opacity="0">
+    <text x="${sidePadding + lineNumWidth - 10}" y="${y}" text-anchor="end" dominant-baseline="middle"
+      font-family="${FONT_FAMILY_MONO}" font-size="${lineNumFontSize}" fill="${PALETTE.textDim}" opacity="0">
       ${i + 1}
       <animate attributeName="opacity" from="0" to="0.5"
         dur="0.2s" begin="${animDelay}s" fill="freeze"/>
     </text>`;
 
-    // Code text (basic syntax coloring via keywords)
+    // Code text (larger for readability on phones)
     const colorizedLine = colorizeLine(lines[i], language);
     elements += `
     <text x="${startX}" y="${y}" dominant-baseline="middle"
-      font-family="${FONT_FAMILY_MONO}" font-size="15" opacity="0">
+      font-family="${FONT_FAMILY_MONO}" font-size="${codeFontSize}" opacity="0">
       ${colorizedLine}
       <animate attributeName="opacity" from="0" to="1"
         dur="0.3s" begin="${animDelay}s" fill="freeze"/>
