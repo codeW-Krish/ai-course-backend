@@ -32,7 +32,9 @@ const PALETTE = {
   codeNumber: "#F78C6C",
 };
 
-const FONT_FAMILY = "'Inter', 'Segoe UI', 'Helvetica Neue', sans-serif";
+const FONT_FAMILY = "Inter, 'Noto Sans', Arial, Helvetica, sans-serif";
+const FONT_FAMILY_MONO = "'JetBrains Mono', 'Fira Code', 'Courier New', monospace";
+const FONT_FAMILY_SERIF = "'Noto Serif', Georgia, 'Times New Roman', serif";
 
 // ─────────────────────────────────────────
 //  Shared SVG helpers
@@ -41,6 +43,10 @@ const FONT_FAMILY = "'Inter', 'Segoe UI', 'Helvetica Neue', sans-serif";
 function svgHeader(width = CANVAS_W, height = CANVAS_H) {
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}" width="${width}" height="${height}">
   <defs>
+    <style>
+      /* Declare font families so resvg/librsvg can match them */
+      text, tspan { font-family: Inter, 'Noto Sans', Arial, Helvetica, sans-serif; }
+    </style>
     <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
       <stop offset="0%" style="stop-color:${PALETTE.bgGradientStart}"/>
       <stop offset="100%" style="stop-color:${PALETTE.bgGradientEnd}"/>
@@ -65,6 +71,8 @@ function svgFooter() {
 
 function escapeXml(str) {
   return String(str)
+    // Strip zero-width / invisible Unicode chars that LLMs sometimes emit
+    .replace(/[\u200B\u200C\u200D\uFEFF\u00AD\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, "")
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
@@ -72,8 +80,10 @@ function escapeXml(str) {
     .replace(/'/g, "&apos;");
 }
 
-function wrapText(text, maxChars = 25) {
-  const words = text.split(" ");
+function wrapText(text, maxChars = 25, maxLines = 0) {
+  // Clean invisible characters before wrapping
+  const clean = String(text).replace(/[\u200B\u200C\u200D\uFEFF\u00AD]/g, "").trim();
+  const words = clean.split(/\s+/);
   const lines = [];
   let current = "";
   for (const word of words) {
@@ -85,6 +95,12 @@ function wrapText(text, maxChars = 25) {
     }
   }
   if (current) lines.push(current);
+  // Clamp to max lines if specified (truncate with ellipsis)
+  if (maxLines > 0 && lines.length > maxLines) {
+    const truncated = lines.slice(0, maxLines);
+    truncated[maxLines - 1] = truncated[maxLines - 1].slice(0, -1) + "\u2026";
+    return truncated;
+  }
   return lines;
 }
 
@@ -191,7 +207,7 @@ export function generateDiagramSVG(scenePlan) {
     }
 
     // Label
-    const labelLines = wrapText(node.label, 14);
+    const labelLines = wrapText(node.label, 18, 3);
     const labelY = -(labelLines.length - 1) * 10;
     for (let l = 0; l < labelLines.length; l++) {
       elements += `
@@ -338,7 +354,7 @@ export function generateCodeSVG(scenePlan) {
     // Line number
     elements += `
     <text x="${PADDING + 40}" y="${y}" text-anchor="end" dominant-baseline="middle"
-      font-family="'JetBrains Mono', 'Fira Code', monospace" font-size="14" fill="${PALETTE.textDim}" opacity="0">
+      font-family="${FONT_FAMILY_MONO}" font-size="14" fill="${PALETTE.textDim}" opacity="0">
       ${i + 1}
       <animate attributeName="opacity" from="0" to="0.5"
         dur="0.2s" begin="${animDelay}s" fill="freeze"/>
@@ -348,7 +364,7 @@ export function generateCodeSVG(scenePlan) {
     const colorizedLine = colorizeLine(lines[i], language);
     elements += `
     <text x="${startX}" y="${y}" dominant-baseline="middle"
-      font-family="'JetBrains Mono', 'Fira Code', monospace" font-size="15" opacity="0">
+      font-family="${FONT_FAMILY_MONO}" font-size="15" opacity="0">
       ${colorizedLine}
       <animate attributeName="opacity" from="0" to="1"
         dur="0.3s" begin="${animDelay}s" fill="freeze"/>
@@ -638,8 +654,8 @@ export function generateQuoteSVG(scenePlan) {
   // Decorative quote mark
   elements += `
   <text x="${CANVAS_W / 2}" y="${CANVAS_H / 2 - 80}" text-anchor="middle"
-    font-family="Georgia, serif" font-size="120" fill="${PALETTE.primary}30" opacity="0">
-    &#8220;
+    font-family="${FONT_FAMILY}" font-size="120" fill="${PALETTE.primary}30" opacity="0">
+    \u201C
     <animate attributeName="opacity" from="0" to="1" dur="0.6s" begin="0.1s" fill="freeze"/>
   </text>`;
 

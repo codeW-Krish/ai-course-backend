@@ -15,6 +15,9 @@ import { synthesize } from "../service/ttsService.js";
 import { planTransitions } from "../service/transitionEngine.js";
 import { uploadAudio, uploadImage } from "../service/imagekitService.js";
 import { serializeTimestamps } from "../utils/firestoreSerializer.js";
+import { Resvg } from "@resvg/resvg-js";
+import { fileURLToPath } from "url";
+import nodePath from "path";
 
 const coursesRef = db.collection("courses");
 const manifestsRef = db.collection("video_manifests");
@@ -122,21 +125,56 @@ function stripSvgAnimations(svgString) {
   // 4. Also handle style-based opacity:0
   s = s.replace(/opacity\s*:\s*0\b/gi, "opacity:1");
 
+  // 5. Fix stroke-dashoffset (diagrams use dasharray animation — show full lines)
+  s = s.replace(/stroke-dashoffset\s*=\s*"[^"]*"/gi, 'stroke-dashoffset="0"');
+
+  // 6. Strip zero-width / invisible Unicode characters that LLMs sometimes emit
+  s = s.replace(/[\u200B\u200C\u200D\uFEFF\u00AD]/g, "");
+
   return s;
 }
 
 // ─────────────────────────────────────────
-//  Helper: SVG → PNG buffer via sharp
+//  Helper: SVG → PNG buffer via @resvg/resvg-js
+//  Uses bundled fonts for reliable text rendering
+//  on any server (no system font dependency)
 // ─────────────────────────────────────────
 
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = nodePath.dirname(__filename);
+const FONTS_DIR = nodePath.resolve(__dirname, "..", "assets", "fonts");
+
 async function svgToPngBuffer(svgString, width = DEFAULT_RESOLUTION.width, height = DEFAULT_RESOLUTION.height) {
-  const sharp = (await import("sharp")).default;
-  // Strip animations so sharp renders the final visible state, not frame-0
+  // Strip animations so resvg renders the final visible state, not frame-0
   const staticSvg = stripSvgAnimations(svgString);
-  return sharp(Buffer.from(staticSvg))
-    .resize(width, height)
-    .png()
-    .toBuffer();
+
+  const opts = {
+    fitTo: { mode: "width", value: width },
+    font: {
+      fontFiles: [
+        nodePath.join(FONTS_DIR, "Inter-Regular.ttf"),
+        nodePath.join(FONTS_DIR, "Inter-Bold.ttf"),
+        nodePath.join(FONTS_DIR, "NotoSans-Regular.ttf"),
+      ],
+      loadSystemFonts: false, // don't depend on server fonts
+      defaultFontFamily: "Inter",
+    },
+    logLevel: "off",
+  };
+
+  try {
+    const resvg = new Resvg(staticSvg, opts);
+    const pngData = resvg.render();
+    return Buffer.from(pngData.asPng());
+  } catch (err) {
+    console.warn(`⚠️ resvg render failed: ${err.message}, falling back to sharp`);
+    // Fallback to sharp (may have font issues but at least produces an image)
+    const sharp = (await import("sharp")).default;
+    return sharp(Buffer.from(staticSvg))
+      .resize(width, height)
+      .png()
+      .toBuffer();
+  }
 }
 
 // ─────────────────────────────────────────
