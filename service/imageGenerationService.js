@@ -189,7 +189,7 @@ async function deapiGenerate(prompt, width = 1024, height = 768) {
 
 const PROVIDER_CHAIN = [
   // { name: "pixazo", fn: pixazoGenerate, envKey: "PIXAZO_API_KEY" },  // TODO: re-enable when API key is available
-  // { name: "imagegpt", fn: imagegptGenerate, envKey: "IMAGEGPT_API_KEY" },
+  { name: "imagegpt", fn: imagegptGenerate, envKey: "IMAGEGPT_API_KEY" },
   { name: "deapi", fn: deapiGenerate, envKey: "DEAPI_API_KEY" },
 ];
 
