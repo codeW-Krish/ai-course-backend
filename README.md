@@ -112,77 +112,19 @@ Per subtopic artifacts:
 
 ## Tech stack
 
-Layer
-
-Technology
-
-Why
-
-API Server
-
-Node.js · Express 5
-
-Fast route orchestration, SSE-friendly response handling
-
-Auth
-
-Firebase Auth Admin SDK · JWT
-
-Token verification across all protected routes
-
-Data Store
-
-Firebase Firestore
-
-Document model maps naturally to course → unit → subtopic → artifact
-
-LLM Router
-
-Custom `getLLMProvider`
-
-Per-request provider and model control without changing controller interfaces
-
-LLM Providers
-
-Groq · Cerebras · Gemini · GLM
-
-Different latency/throughput/reasoning profiles per task type
-
-Schema Validation
-
-Zod
-
-Strict JSON contracts — malformed responses rejected before persistence
-
-Streaming
-
-Server-Sent Events
-
-Real-time generation progress with low mobile integration overhead
-
-Audio / TTS
-
-Groq TTS · Resemble
-
-Chunked narration with WAV duration measurement for video sync
-
-Visual Pipeline
-
-SVG generator · Resvg/Sharp · image APIs
-
-Structured scene rendering with provider fallback per scene
-
-Asset CDN
-
-ImageKit
-
-Hosts generated images and audio for manifest playback
-
-Video Delivery
-
-Manifest-first JSON
-
-Avoids server-side video rendering; client plays scene assets in sync
+| Layer | Technology | Why |
+|---|---|---|
+| API Server | Node.js · Express 5 | Fast route orchestration, SSE-friendly response handling |
+| Auth | Firebase Auth Admin SDK · JWT | Token verification across all protected routes |
+| Data Store | Firebase Firestore | Document model maps naturally to course → unit → subtopic → artifact |
+| LLM Router | Custom `getLLMProvider` | Per-request provider and model control without changing controller interfaces |
+| LLM Providers | Groq · Cerebras · Gemini · GLM | Different latency/throughput/reasoning profiles per task type |
+| Schema Validation | Zod | Strict JSON contracts — malformed responses rejected before persistence |
+| Streaming | Server-Sent Events | Real-time generation progress with low mobile integration overhead |
+| Audio / TTS | Groq TTS · Resemble | Chunked narration with WAV duration measurement for video sync |
+| Visual Pipeline | SVG generator · Resvg/Sharp · image APIs | Structured scene rendering with provider fallback per scene |
+| Asset CDN | ImageKit | Hosts generated images and audio for manifest playback |
+| Video Delivery | Manifest-first JSON | Avoids server-side video rendering; client plays scene assets in sync |
 
 ----------
 
@@ -266,25 +208,17 @@ node test/phaseab-smoke.js
 The hardest part was not the LLM calls — it was everything around them. Building the explanation video pipeline without a video-generation model taught me that you can decompose almost any "expensive API" problem into smaller, cheaper, more controllable pieces: generate the script, synthesize the audio, render the
 visuals separately, measure the WAV duration, assemble the manifest. The output is equivalent and you own every stage. The audio overview pipeline followed the same logic — chunked TTS with measured durations so playback sync is deterministic, not estimated.
 
-The gamification layer (hearts, retry limits, quiz-gated progression) taught me that keeping users in active learning mode is an architecture decision, not a UI decision. If the gate lives in the app it gets bypassed. If it lives in` user_subtopic_progress` and `submitQuiz` enforces it server-side, it cannot. The YouTube suggestion per subtopic was a small addition that had a disproportionate impact — giving users a "go deeper" path right after the quiz keeps them in the learning context instead of dropping them back to a home screen with nothing to do.
+The gamification layer (hearts, retry limits, quiz-gated progression) taught me that keeping users in active learning mode is an architecture decision, not a UI decision. If the gate lives in the app it gets bypassed. If it lives in `user_subtopic_progress` and `submitQuiz` enforces it server-side, it cannot. The YouTube suggestion per subtopic was a small addition that had a disproportionate impact — giving users a "go deeper" path right after the quiz keeps them in the learning context instead of dropping them back to a home screen with nothing to do.
 
-If I rebuilt this I would define the manifest schema and every content contract before writing a single prompt — fixing output format issues across six contenttypes mid-development is significantly more expensive than designing them upfront.
+If I rebuilt this I would define the manifest schema and every content contract before writing a single prompt — fixing output format issues across six content types mid-development is significantly more expensive than designing them upfront.
 
 ----------
 
 ## Related repos
 
-Repo
-
-Description
-
-[ai-course-generator](https://github.com/codeW-Krish/ai-course-generator)
-
-Android client — Kotlin, consumes this backend
-
-[docu-chat](https://github.com/codeW-Krish/docu-chat)
-
-Multi-document RAG with real-time passage highlighting
+| Repo | Description |
+|---|---|
+| [ai-course-generator](https://github.com/codeW-Krish/ai-course-generator) | Android client — Kotlin, consumes this backend |
 
 ----------
 
