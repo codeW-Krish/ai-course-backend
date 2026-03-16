@@ -5,7 +5,14 @@
 >  _"Generates a course. Then enforces that you actually learn it."_
 >  
 
-[![Walkthrough](https://img.shields.io/badge/Watch_Walkthrough-FF0000?style=for-the-badge&logo=youtube&logoColor=white)](https://your-demo-link/) [![Android Client](https://img.shields.io/badge/Android_Client-7F52FF?style=for-the-badge&logo=kotlin&logoColor=white)](https://github.com/codeW-Krish/ai-course-generator) [![Node.js](https://img.shields.io/badge/Node.js_20-339933?style=for-the-badge&logo=nodedotjs&logoColor=white)](https://nodejs.org/) [![Express](https://img.shields.io/badge/Express_5-000000?style=for-the-badge&logo=express&logoColor=white)](https://expressjs.com/) [![Firebase](https://img.shields.io/badge/Firestore-FFCA28?style=for-the-badge&logo=firebase&logoColor=black)](https://firebase.google.com/) [![Groq](https://img.shields.io/badge/Groq-F55036?style=for-the-badge)](https://groq.com/) [![Cerebras](https://img.shields.io/badge/Cerebras-2563eb?style=for-the-badge)](https://cerebras.ai/) [![Gemini](https://img.shields.io/badge/Gemini-1a73e8?style=for-the-badge&logo=google&logoColor=white)](https://deepmind.google/gemini) [![SSE](https://img.shields.io/badge/SSE_Streaming-9333ea?style=for-the-badge)](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events)
+## Related repos
+
+| Repo | Description |
+|---|---|
+| [ai-course-generator](https://github.com/codeW-Krish/ai-course-generator) | Android client — Kotlin, consumes this backend |
+
+
+[![Android Client](https://img.shields.io/badge/Android_Client-7F52FF?style=for-the-badge&logo=kotlin&logoColor=white)](https://github.com/codeW-Krish/ai-course-generator) [![Node.js](https://img.shields.io/badge/Node.js_20-339933?style=for-the-badge&logo=nodedotjs&logoColor=white)](https://nodejs.org/) [![Express](https://img.shields.io/badge/Express_5-000000?style=for-the-badge&logo=express&logoColor=white)](https://expressjs.com/) [![Firebase](https://img.shields.io/badge/Firestore-FFCA28?style=for-the-badge&logo=firebase&logoColor=black)](https://firebase.google.com/) [![Groq](https://img.shields.io/badge/Groq-F55036?style=for-the-badge)](https://groq.com/) [![Cerebras](https://img.shields.io/badge/Cerebras-2563eb?style=for-the-badge)](https://cerebras.ai/) [![Gemini](https://img.shields.io/badge/Gemini-1a73e8?style=for-the-badge&logo=google&logoColor=white)](https://deepmind.google/gemini) [![SSE](https://img.shields.io/badge/SSE_Streaming-9333ea?style=for-the-badge)](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events)
 
 </div>
 
@@ -213,17 +220,8 @@ The gamification layer (hearts, retry limits, quiz-gated progression) taught me 
 If I rebuilt this I would define the manifest schema and every content contract before writing a single prompt — fixing output format issues across six content types mid-development is significantly more expensive than designing them upfront.
 
 ----------
-
-## Related repos
-
-| Repo | Description |
-|---|---|
-| [ai-course-generator](https://github.com/codeW-Krish/ai-course-generator) | Android client — Kotlin, consumes this backend |
-
-----------
-
 <div align="center">
 
-Made by [Krish Dalsaniya](https://github.com/codeW-Krish) · [LinkedIn](https://linkedin.com/in/YOUR-LINKEDIN) · [Watch Walkthrough](https://your-demo-link/)
+Made by [Krish Dalsaniya](https://github.com/codeW-Krish) · [LinkedIn](https://linkedin.com/in/YOUR-LINKEDIN)
 
 </div>
