@@ -1,5 +1,5 @@
   
-<div align="center"> <img src="https://readme-typing-svg.demolab.com?font=Fira+Code&weight=600&size=27&pause=1000&color=6366F1&center=true&vCenter=true&width=700&lines=UpSkill+AI+%E2%80%94+Backend;AI+Course+Generation+%2B+Quiz-Gated+Progression;Generates+a+course.+Enforces+you+learn+it." alt="UpSkill AI Backend" /> <br/>
+<div align="center"> <img src="https://readme-typing-svg.demolab.com?font=Fira+Code&weight=600&size=26&pause=1000&color=6366F1&center=true&vCenter=true&width=700&lines=UpSkill+AI+%E2%80%94+Backend;AI+Course+Generation+%2B+Quiz-Gated+Progression;Generates+a+course.+Enforces+you+learn+it." alt="UpSkill AI Backend" /> <br/>
 
 
 >  _"Generates a course. Then enforces that you actually learn it."_
