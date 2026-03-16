@@ -1,32 +1,37 @@
-import jwt from "jsonwebtoken";
+import { tokenErrorReason, verifyAccessToken, extractBearerToken } from "../service/authTokenService.js";
 
-export const authMiddleware = (req, res, next) => {
-  const authHeader = req.headers['authorization'];
+const authMiddleware = async (req, res, next) => {
+  const authHeader = req.headers.authorization;
+  const accessToken = extractBearerToken(authHeader);
 
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return res.status(401).json({ message: "Authorization header is missing or malformed" });
+  if (!accessToken) {
+    console.warn("[auth:middleware] 401 missing_token (no bearer token)");
+    return res.status(401).json({
+      error: "No token provided",
+      reason: "missing_token",
+    });
   }
-
-  const token = authHeader.split(' ')[1];
 
   try {
-    const secretKey = process.env.ACCESS_TOKEN_SECRET;
+    const decoded = verifyAccessToken(accessToken);
 
-    if (!secretKey) {
-      throw new Error('ACCESS_TOKEN_SECRET not set in environment variables');
-    }
-
-    const decoded = jwt.verify(token, secretKey);
-
-    // Attach user data from token to request object
     req.user = {
-      id: decoded.sub || decoded.subject,
+      id: decoded.sub,
       email: decoded.email,
-      username: decoded.username,
+      role: decoded.role || "user",
+      username: decoded.email?.split("@")[0] || "User",
     };
 
-    next(); // ✅ Continue to the next middleware or route
-  } catch (err) {
-    return res.status(403).json({ message: "Invalid or expired token" });
+    next();
+  } catch (error) {
+    const reason = tokenErrorReason(error);
+    console.warn(`[auth:middleware] 401 ${reason} (${error?.message || "verify failed"})`);
+    return res.status(401).json({
+      error: reason === "expired_token" ? "Token expired" : "Invalid token",
+      reason,
+    });
   }
 };
+
+export { authMiddleware };
+export default authMiddleware;

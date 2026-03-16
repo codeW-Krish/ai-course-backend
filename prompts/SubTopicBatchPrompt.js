@@ -23,6 +23,7 @@ Generate clear, structured, meaningful, and appropriate educational content for 
 - Do NOT use triple backticks  or any markdown formatting in the "code_or_math" field.
 - Return code as a plain string, escaped for JSON.
 - Each code block must be a single-line or multi-line string that can be parsed by JSON.parse().
+- Deep Dive into individual subtopics, and in subtopic content, make sure each subtopic's content is long enough to be understood by anyone
 
 📦 INPUT JSON FORMAT:
 {

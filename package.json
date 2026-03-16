@@ -4,8 +4,10 @@
   "main": "index.js",
   "type": "module",
   "scripts": {
+    "start": "node index.js",
     "test": "echo \"Error: no test specified\" && exit 1",
-    "dev": "nodemon index.js"
+    "dev": "nodemon index.js",
+    "test:auth-contract": "node test/auth-contract-test.js"
   },
   "author": "",
   "license": "ISC",
@@ -13,19 +15,24 @@
   "dependencies": {
     "@cerebras/cerebras_cloud_sdk": "^1.50.0",
     "@google/generative-ai": "^0.24.1",
+    "@imagekit/nodejs": "^7.3.0",
+    "@resemble/node": "^3.5.2",
+    "@resvg/resvg-js": "^2.6.2",
     "axios": "^1.11.0",
-    "bcrypt": "^6.0.0",
     "cors": "^2.8.5",
     "disposable-email-domains": "^1.0.62",
     "dotenv": "^17.2.1",
     "express": "^5.1.0",
-    "fetch": "^1.1.0",
+    "firebase-admin": "^13.6.1",
+    "form-data": "^4.0.5",
     "groq": "^4.3.0",
     "groq-sdk": "^0.31.0",
+    "imagekit": "^6.0.0",
     "json5": "^2.2.3",
     "jsonwebtoken": "^9.0.2",
     "nodemon": "^3.1.10",
     "openai": "^6.7.0",
-    "pg": "^8.16.3"
+    "sharp": "^0.34.5",
+    "zod": "^4.3.6"
   }
 }
