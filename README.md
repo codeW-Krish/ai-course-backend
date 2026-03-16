@@ -69,7 +69,7 @@ handles the reasoning-heavy tasks. `getLLMProvider` in `providers/LLMProviders.j
 The pedagogical structure — every subtopic opening with *why this matters* before any concept explanation — is not a writing style. It is a required field in `llm/outlineSchemas.js`, validated by Zod before anything persists. If the model skips it, the response is rejected. Consistency enforced at the schema level, not hoped for at the prompt level.
 
 > For the full technical breakdown of each decision — trade-offs, file references,
-> routing tables, and the video manifest schema — see [ENGINEERING.md](./ENGINEERING.md)
+> routing tables, and the video manifest schema see [ENGINEERING.md](./ENGINEERING.md)
 
 
 ----------
