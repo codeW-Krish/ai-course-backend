@@ -225,6 +225,8 @@ async function planScenes(llm, script, courseTitle, subtopicTitle, difficulty) {
   console.log("🎬 Step 2: Planning scenes...");
 
   const subjectArea = courseTitle.toLowerCase();
+  const planningTraceId = `scene_plan_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
+  console.log(`[${planningTraceId}] Scene planning request started for ${script.chunks.length} chunks`);
 
   const response = await llm(SCENE_PLAN_PROMPT, {
     course_title: courseTitle,
@@ -238,9 +240,46 @@ async function planScenes(llm, script, courseTitle, subtopicTitle, difficulty) {
     })),
   });
 
+  const responseType = response === null ? "null" : Array.isArray(response) ? "array" : typeof response;
+  console.log(`[${planningTraceId}] LLM response type: ${responseType}`);
+  if (response && typeof response === "object") {
+    const keys = Object.keys(response).slice(0, 30);
+    console.log(`[${planningTraceId}] LLM response keys: ${keys.join(", ") || "(none)"}`);
+    if (response.scenes && Array.isArray(response.scenes)) {
+      console.log(`[${planningTraceId}] LLM scenes count: ${response.scenes.length}`);
+      const firstScene = response.scenes[0];
+      if (firstScene && typeof firstScene === "object") {
+        console.log(`[${planningTraceId}] First scene keys: ${Object.keys(firstScene).slice(0, 30).join(", ")}`);
+      }
+    }
+  }
+
   const parsed = ScenePlanListSchema.safeParse(response);
   if (!parsed.success) {
-    console.error("Scene plan schema validation failed:", parsed.error);
+    const issues = parsed.error?.issues || [];
+    const compactIssues = issues.slice(0, 8).map((issue) => ({
+      path: issue.path?.join(".") || "(root)",
+      message: issue.message,
+      code: issue.code,
+      received: issue.received,
+      expected: issue.expected,
+    }));
+    console.error(`[${planningTraceId}] Scene plan schema validation failed. Issue count: ${issues.length}`);
+    console.error(`[${planningTraceId}] Schema issues (first ${compactIssues.length}):`, compactIssues);
+
+    if (response && typeof response === "object" && response.scenes && Array.isArray(response.scenes)) {
+      const badSubsceneKeys = [];
+      response.scenes.forEach((scene, idx) => {
+        if (!scene || typeof scene !== "object") return;
+        Object.keys(scene).forEach((k) => {
+          if (k.includes("subscenes!")) badSubsceneKeys.push({ sceneIndex: idx, key: k });
+        });
+      });
+      if (badSubsceneKeys.length > 0) {
+        console.error(`[${planningTraceId}] Detected malformed subscene keys:`, badSubsceneKeys.slice(0, 10));
+      }
+    }
+
     throw new Error("Failed to generate valid scene plans");
   }
 
